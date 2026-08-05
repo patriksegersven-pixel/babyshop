@@ -3,8 +3,9 @@
  * Read-only JSON endpoint over the simulation spreadsheet (Google Apps Script)
  * ---------------------------------------------------------------------------
  * Serves the "Raw" tab (written by ads-script/gp3-simulations.js) plus the
- * "Config" tab (optional conversion-value -> GP2 multiplier per account) as a
- * single JSON payload that the static dashboard fetches on load.
+ * "Config" tab (optional conversion-value -> GP2 multiplier per account, and the
+ * incrementality factors) as a single JSON payload that the static dashboard fetches
+ * on load.
  *
  * DATA MODEL
  *   The primary conversion action in these accounts sends cart-level GROSS PROFIT
@@ -13,6 +14,17 @@
  *   secondary conversion action that bid simulations do not report. No gross margin
  *   is applied anywhere; doing so would deduct cost of goods twice.
  *
+ * INCREMENTALITY
+ *   Cost is 100% real for every campaign; observed conversion value is not equally
+ *   CAUSED by the ad. Brand campaigns only match our own brand queries, and private-label
+ *   ("pb") campaigns advertise products sold nowhere else - much of their value would
+ *   convert anyway. The Config tab therefore also carries an incrementality factor per
+ *   class (brand 0.20, private-label 0.50, generic 1.00) plus optional per-campaign
+ *   pattern overrides, served as `config.incrementality`. The dashboard multiplies GP2 by
+ *   that factor and reads every recommendation off iGP3 = factor x GP2 - cost. The factors
+ *   are ASSUMPTIONS until a geo holdout or conversion-lift test measures them, which is
+ *   exactly why they live in a spreadsheet cell and not in code.
+ *
  * DEPLOY
  *   1. Open the spreadsheet → Extensions → Apps Script.
  *   2. Paste this file over Code.gs. Save.
@@ -20,7 +32,8 @@
  *        node -e "console.log(require('crypto').randomBytes(24).toString('hex'))"
  *   4. Run setupConfigTab() once from the editor to create the Config tab and
  *      grant the authorisation prompts. The defaults (multiplier 1.0) are correct
- *      unless an account reports revenue instead of GP2.
+ *      unless an account reports revenue instead of GP2. It also seeds the three
+ *      incrementality rows; re-running it later is safe and never overwrites edits.
  *   5. Deploy → New deployment → type "Web app".
  *        Description:   gp3-dashboard-api
  *        Execute as:    Me            (so viewers need no access to the sheet)
@@ -54,7 +67,12 @@ var SCRIPT_TOKEN = 'CHANGE-ME';
 /** Tab holding the appended simulation snapshots. */
 var RAW_SHEET = 'Raw';
 
-/** Tab mapping account name → optional conversion-value to GP2 multiplier. */
+/**
+ * Tab holding both config blocks, side by side as two independent column pairs:
+ *   A: Account   B: Value to GP2 Multiplier   C: Notes
+ *   D: Incrementality Class or Name Pattern   E: Incrementality Factor   F: Notes
+ * The pairs are read independently, so a row may fill either, both or neither.
+ */
 var CONFIG_SHEET = 'Config';
 
 /**
@@ -63,6 +81,28 @@ var CONFIG_SHEET = 'Config';
  * conversion value is revenue rather than GP2 — then its gross margin is the multiplier.
  */
 var DEFAULT_VALUE_TO_GP2_MULTIPLIER = 1.0;
+
+/**
+ * Incrementality factor per class, used when the Config tab says nothing.
+ * Keep these in sync with INCREMENTALITY_DEFAULTS in index.html — the dashboard carries
+ * the same numbers so it still works against an endpoint that predates this block.
+ *   brand         0.20  only matches our own brand queries; largely defensive spend
+ *   private-label 0.50  own-label products sold nowhere else; much converts anyway
+ *   generic       1.00  open-market prospecting; the click is the demand
+ */
+var DEFAULT_INCREMENTALITY = { brand: 0.20, 'private-label': 0.50, generic: 1.00 };
+
+/**
+ * Accepted spellings in the Config tab for each class key (compared after canon(), which
+ * strips punctuation and case, so "Private Label" and "private-label" both land here).
+ * Deliberately short: anything NOT in this map is treated as a campaign-name pattern, so
+ * adding loose aliases here would quietly swallow legitimate overrides.
+ */
+var INCREMENTALITY_CLASS_ALIASES = {
+  brand: 'brand',
+  privatelabel: 'private-label',
+  generic: 'generic'
+};
 
 /** Hard cap on returned rows, newest run dates first. */
 var MAX_ROWS = 20000;
@@ -197,27 +237,60 @@ function readRaw(ss, params) {
 
 /**
  * Read the Config tab into
- *   { valueToGp2Multipliers: {account: number}, defaultValueToGp2Multiplier: number }
- * Both keys are consumed under exactly these names by index.html. An empty or missing
- * Config tab yields the default 1.0, which is the correct setting for every account
- * that sends gross profit as its conversion value.
+ *   {
+ *     valueToGp2Multipliers: { account: number },
+ *     defaultValueToGp2Multiplier: number,
+ *     incrementality: {
+ *       classes:   { brand: number, 'private-label': number, generic: number },
+ *       overrides: [ { pattern: string, factor: number }, ... ]
+ *     }
+ *   }
+ * Every key is consumed under exactly these names by index.html — keep them in sync.
+ *
+ * Columns A/B carry the account -> GP2 multiplier pair; columns D/E carry the
+ * incrementality pair. A D-cell matching a class name ("brand", "private-label"/"pb",
+ * "generic") sets that class's factor; anything else is treated as a CAMPAIGN NAME
+ * PATTERN override, matched case-insensitively as a substring of the campaign name, with
+ * the longest matching pattern winning. Rows with an empty key or an unparseable factor
+ * are skipped, so free-text comment rows in the tab are harmless.
+ *
+ * An empty or missing Config tab yields multiplier 1.0 and DEFAULT_INCREMENTALITY.
  */
 function readConfig(ss) {
-  var out = { valueToGp2Multipliers: {}, defaultValueToGp2Multiplier: DEFAULT_VALUE_TO_GP2_MULTIPLIER };
+  var classes = {};
+  Object.keys(DEFAULT_INCREMENTALITY).forEach(function (k) { classes[k] = DEFAULT_INCREMENTALITY[k]; });
+
+  var out = {
+    valueToGp2Multipliers: {},
+    defaultValueToGp2Multiplier: DEFAULT_VALUE_TO_GP2_MULTIPLIER,
+    incrementality: { classes: classes, overrides: [] }
+  };
   var sheet = ss.getSheetByName(CONFIG_SHEET);
   if (!sheet || sheet.getLastRow() < 2) return out;
 
-  var values = sheet.getRange(1, 1, sheet.getLastRow(), Math.max(2, sheet.getLastColumn()))
-    .getDisplayValues();
+  // read at least through column E, but never past the sheet's real width
+  var width = Math.min(sheet.getMaxColumns(), Math.max(5, sheet.getLastColumn()));
+  var values = sheet.getRange(1, 1, sheet.getLastRow(), width).getDisplayValues();
 
   for (var i = 1; i < values.length; i++) {
-    var name = String(values[i][0]).trim();
-    var raw = values[i][1];
-    if (!name) continue;
-    var mult = toMultiplier(raw);
-    if (mult === null) continue;
-    if (name.toLowerCase() === 'default' || name === '*') out.defaultValueToGp2Multiplier = mult;
-    else out.valueToGp2Multipliers[name] = mult;
+    // --- columns A/B: conversion value -> GP2 multiplier, per account ---
+    var name = String(values[i][0] == null ? '' : values[i][0]).trim();
+    if (name) {
+      var mult = toMultiplier(values[i][1]);
+      if (mult !== null) {
+        if (name.toLowerCase() === 'default' || name === '*') out.defaultValueToGp2Multiplier = mult;
+        else out.valueToGp2Multipliers[name] = mult;
+      }
+    }
+
+    // --- columns D/E: incrementality class or campaign-name pattern -> factor ---
+    var key = String(values[i][3] == null ? '' : values[i][3]).trim();
+    if (!key) continue;
+    var factor = toFactor(values[i][4]);
+    if (factor === null) continue;              // comment row, or an unreadable factor
+    var cls = INCREMENTALITY_CLASS_ALIASES[canon(key)];
+    if (cls) out.incrementality.classes[cls] = factor;
+    else out.incrementality.overrides.push({ pattern: key, factor: factor });
   }
   return out;
 }
@@ -277,6 +350,21 @@ function toMultiplier(v) {
   return n > 1 ? null : n;
 }
 
+/**
+ * Parse an incrementality factor. Same forgiving notation as the multiplier — "0.2",
+ * "0,2", "20" and "20%" all become 0.20 — but zero is allowed here, meaning "this
+ * campaign is assumed to cause none of its reported value". Returns null when the cell
+ * is blank or unreadable, so the class default (or a comment row) is left alone.
+ */
+function toFactor(v) {
+  var s = String(v == null ? '' : v).trim();
+  if (!s) return null;
+  var n = toNumber(s);
+  if (!isFinite(n) || n < 0) return null;
+  if (n > 1) n = n / 100;          // "20" meant 20 per cent
+  return n > 1 ? null : n;
+}
+
 /** Sheet dates may be Date objects or locale strings; emit yyyy-MM-dd. */
 function normaliseDate(v) {
   if (v instanceof Date) return Utilities.formatDate(v, 'UTC', 'yyyy-MM-dd');
@@ -302,10 +390,14 @@ function pad(n) { return ('0' + n).slice(-2); }
 /* ========================== ONE-TIME SETUP ========================== */
 
 /**
- * Run once from the Apps Script editor. Creates the Config tab (if missing) and
- * pre-fills it with the accounts already present in the Raw tab, each at multiplier 1.
- * The tab is an escape hatch, not a required step: it exists only so an account whose
+ * Run once from the Apps Script editor. Creates the Config tab (if missing), pre-fills it
+ * with the accounts already present in the Raw tab (each at multiplier 1), and seeds the
+ * three incrementality class rows.
+ *
+ * The A/B pair is an escape hatch, not a required step: it exists only so an account whose
  * conversion value is revenue rather than GP2 can be converted with its gross margin.
+ * The D/E pair is different — it is meant to be edited. Idempotent: existing values are
+ * never overwritten, so re-running after an upgrade only adds what is missing.
  */
 function setupConfigTab() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -345,9 +437,61 @@ function setupConfigTab() {
       }
     }
   }
+
+  seedIncrementalityRows(sheet);
+
   Logger.log('Config tab ready. Leave every multiplier at 1 unless an account reports ' +
     'revenue instead of GP2 as its conversion value; then set that account\'s gross margin. ' +
+    'Incrementality factors live in columns D/E and ARE meant to be edited — they are ' +
+    'assumptions until a geo holdout or conversion-lift test measures them. ' +
     'Deploy the web app afterwards.');
+}
+
+/**
+ * Seed columns D–F of the Config tab: one row per incrementality class plus a comment row
+ * documenting per-campaign overrides. Done as a separate column pair rather than a section
+ * in column A so a class name can never collide with an account name, and so the two
+ * blocks can be edited independently. Never touches a cell that already has a value.
+ */
+function seedIncrementalityRows(sheet) {
+  if (sheet.getMaxColumns() < 6) sheet.insertColumnsAfter(sheet.getMaxColumns(), 6 - sheet.getMaxColumns());
+
+  if (!String(sheet.getRange(1, 4).getDisplayValue()).trim()) {
+    sheet.getRange(1, 4, 1, 3)
+      .setValues([['Incrementality Class or Name Pattern', 'Incrementality Factor', 'Notes']])
+      .setFontWeight('bold');
+  }
+
+  var lastRow = sheet.getLastRow();
+  var hasAny = false;
+  if (lastRow > 1) {
+    sheet.getRange(2, 4, lastRow - 1, 1).getDisplayValues().forEach(function (r) {
+      if (String(r[0]).trim()) hasAny = true;
+    });
+  }
+  if (hasAny) return;   // already configured — leave the operator's numbers alone
+
+  var seed = [
+    ['brand', '0.20',
+      'Brand campaigns only match babyshop/lekmer brand queries. That demand already chose us and mostly ' +
+      'arrives anyway, so only ~20% of the reported value is assumed to be caused by the ad. Cost is 100% real. ' +
+      'Note the spend is also defensive (competitors bid on our brand terms), so a low factor does NOT mean minimise.'],
+    ['private-label', '0.50',
+      'Private-label ("pb") campaigns advertise products sold nowhere else — the shopper who wants one has a ' +
+      'single place to buy it, so roughly half the value is assumed to convert without the ad.'],
+    ['generic', '1.00',
+      'Open-market prospecting: the click is the demand, so value is taken at face value. Leave at 1.00.'],
+    ['', '',
+      'OVERRIDES: put a campaign-name pattern (not a class) in column D with its own factor in column E to ' +
+      'override that campaign\'s class factor — e.g. "p-shopping-se-pb-product" with 0.65. Matching is ' +
+      'case-insensitive substring; when several patterns match a name, the LONGEST one wins. ' +
+      'All of these are assumptions: replace them with geo-holdout or conversion-lift measurements when you have them.']
+  ];
+
+  var needRows = 1 + seed.length;
+  if (sheet.getMaxRows() < needRows) sheet.insertRowsAfter(sheet.getMaxRows(), needRows - sheet.getMaxRows());
+  sheet.getRange(2, 4, seed.length, 3).setValues(seed);
+  Logger.log('Seeded incrementality defaults: brand 0.20, private-label 0.50, generic 1.00.');
 }
 
 /** Sanity-check the payload from the editor without deploying. */

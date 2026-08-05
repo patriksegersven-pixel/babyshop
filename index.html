@@ -101,6 +101,12 @@ td:last-child{padding-right:0;}
 tbody tr:hover td{background:var(--panel-2);}
 tbody tr.sel td{background:var(--accent-soft);}
 tr.total-row td{font-weight:700;border-top:2px solid var(--ink);border-bottom:none;padding-top:12px;background:none!important;}
+/* incrementality-class sections in the summary table */
+tr.sec-row td{background:var(--panel-2)!important;padding:18px 0 8px;border-bottom:1px solid var(--line);white-space:normal;}
+tr.sec-row .sec-t{font-weight:700;font-size:12px;text-transform:uppercase;letter-spacing:.09em;color:var(--ink);}
+tr.sec-row .sec-d{display:block;font-weight:400;font-size:11.5px;color:var(--muted);margin-top:3px;max-width:980px;line-height:1.45;}
+tr.sub-row td{font-weight:600;background:var(--panel-2)!important;border-bottom:1px solid var(--line);}
+tr.sub-row td:first-child{color:var(--muted);font-weight:500;}
 .strat-cell{display:flex;flex-direction:column;gap:1px;}
 .strat-cell .nm{font-weight:600;cursor:pointer;}
 .strat-cell .nm:hover{color:var(--accent-ink);text-decoration:underline;}
@@ -112,7 +118,13 @@ tr.total-row td{font-weight:700;border-top:2px solid var(--ink);border-bottom:no
 .pill.unknown{color:var(--muted);background:rgba(109,121,134,.10);}
 /* only rendered for accounts with a non-1.0 valueToGp2Multiplier */
 .pill.mult{color:var(--marg);background:rgba(180,118,43,.10);font-weight:500;}
+/* assumed incrementality factor — only rendered when it is not 1.0 */
+.pill.inc{color:var(--cur);background:rgba(122,79,191,.10);font-weight:500;}
 .num.pos{color:var(--pos);} .num.neg{color:var(--neg);}
+
+/* ---------- incrementality notes ---------- */
+.sens{font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:12.5px;}
+.assumption{font-size:11.5px;color:var(--muted);}
 
 /* ---------- charts ---------- */
 .chart-box{position:relative;height:330px;}
@@ -200,9 +212,11 @@ body.locked #gate{display:flex;}
       <div class="card-head">
         <div>
           <h3>Where every strategy should sit</h3>
-          <p class="hint">One row per portfolio bidding strategy at the selected snapshot. <b>Recommended</b> is the
-            simulated target with the highest GP3; <b>breakeven</b> is the interpolated target where the next krona of
-            spend stops paying for itself (marginal ROAS = 1.0). A <b>higher</b> target ROAS means <b>less</b> spend.</p>
+          <p class="hint">One row per portfolio bidding strategy at the selected snapshot, grouped by
+            <b>incrementality class</b> — generic first, then private label, then brand. <b>Recommended</b> is the
+            simulated target with the highest <b>incremental</b> GP3; <b>breakeven</b> is the interpolated target where
+            the next krona of spend stops paying for itself (marginal incremental ROAS = 1.0). Observed GP3 is shown
+            alongside. A <b>higher</b> target ROAS means <b>less</b> spend.</p>
         </div>
       </div>
       <div class="tscroll"><table id="summaryTable"></table></div>
@@ -221,25 +235,25 @@ body.locked #gate{display:flex;}
         <div class="ctl"><span class="ctl-lbl">Strategy</span><select id="stratSel"></select></div>
         <div class="kv" id="stratMeta"></div>
       </div>
+      <!-- incrementality assumption + sensitivity, rendered only when the factor is not 1.0 -->
+      <div id="stratIncBox"></div>
     </div>
     <div class="card">
       <h3>Profit curve — GP2 and GP3 against cost</h3>
       <p class="hint">Each dot is one simulated target ROAS. GP3 peaks where the GP2 curve's slope falls to 1.0 —
         past that point Google can still buy more GP2, but each extra krona of spend buys less than a krona of it,
-        so GP3 falls.</p>
+        so GP3 falls. When an incrementality factor below 1.0 applies, the <b>incremental</b> GP3 line is the one
+        the recommendation is read off; the observed GP3 line stays visible next to it.</p>
       <div class="chart-box tall"><canvas id="chartCurve"></canvas></div>
-      <div class="legend">
-        <span><i class="sw" style="background:var(--gp2)"></i>GP2</span>
-        <span><i class="sw" style="background:var(--gp3)"></i>GP3</span>
-        <span><i class="sw pt" style="background:var(--cur)"></i>Current target</span>
-        <span><i class="sw pt" style="background:var(--accent)"></i>Recommended (GP3 max)</span>
-      </div>
+      <div class="legend" id="curveLegend"></div>
     </div>
     <div class="card">
       <h3>Marginal ROAS by target</h3>
       <p class="hint">&Delta;GP2 &divide; &Delta;Cost between adjacent simulation points, plotted at each segment's
         midpoint target. Where the line crosses 1.0 is the profit-maximising target; the crossing is found by
-        linear interpolation between the two bracketing segments.</p>
+        linear interpolation between the two bracketing segments. With an incrementality factor below 1.0 the solid
+        line is the <b>incremental</b> marginal (&Delta;iGP2 &divide; &Delta;Cost) — the one that decides — and the
+        faint dashed line is the observed marginal it was cut down from.</p>
       <div class="chart-box"><canvas id="chartMarginal"></canvas></div>
     </div>
     <div class="card">
@@ -255,9 +269,11 @@ body.locked #gate{display:flex;}
       <div class="card-head">
         <div>
           <h3>Equal-marginal-return allocation</h3>
-          <p class="hint">Spend the budget one krona at a time, always on whichever strategy returns the most GP2 for
-            it. At the stopping point every strategy earns the same marginal ROAS — the condition for a
-            profit-optimal portfolio. Below that, targets are read back off each strategy's curve.</p>
+          <p class="hint">Spend the budget one krona at a time, always on whichever strategy returns the most
+            <b>incremental</b> GP2 for it. At the stopping point every strategy earns the same marginal incremental
+            ROAS — the condition for a profit-optimal portfolio. Below that, targets are read back off each strategy's
+            curve. Because brand and private-label value is discounted first, this is what pulls budget out of them
+            and into generic; the note below sizes that shift against the unadjusted allocation.</p>
         </div>
         <div class="ctl">
           <span class="ctl-lbl">Budget</span>
@@ -276,9 +292,9 @@ body.locked #gate{display:flex;}
       <div class="chart-box tall"><canvas id="chartAlloc"></canvas></div>
     </div>
     <div class="card">
-      <h3>Portfolio GP3 against total budget</h3>
-      <p class="hint">Total GP3 achievable at each budget level under the optimal allocation. The peak is the
-        unconstrained profit optimum.</p>
+      <h3>Portfolio incremental GP3 against total budget</h3>
+      <p class="hint">Total incremental GP3 achievable at each budget level under the optimal allocation. The peak is
+        the unconstrained profit optimum.</p>
       <div class="chart-box"><canvas id="chartBudget"></canvas></div>
     </div>
   </div>
@@ -514,6 +530,111 @@ function normalizePayload(payload) {
   return out;
 }
 
+/* ---------- incrementality ----------------------------------------------------
+
+   WHY THIS EXISTS
+   Ad cost is 100% real for every campaign. Observed conversion value is not equally
+   *caused* by the ad:
+
+     brand         — these campaigns only match babyshop / lekmer brand queries. That
+                     traffic already decided to buy from us; most of it arrives anyway
+                     through organic, direct or a later session. The campaign is largely
+                     defensive (it stops competitors buying our brand terms), so its
+                     curve overstates true incremental GP3 while every krona of cost is real.
+     private-label — "pb" campaigns advertise our own-label products, sold nowhere else.
+                     A shopper who wants that specific product has exactly one place to
+                     buy it, so a large share of the value would convert without the ad.
+     generic       — prospecting against open-market demand, where the click genuinely
+                     is the demand. This is where curve optimisation honestly earns money.
+
+   Consequence: brand and private-label must be MANAGED DIFFERENTLY from generic. Their
+   raw GP3-max target is not a valid recommendation; the incremental one is. The factors
+   below are ASSUMPTIONS, editable in the Config tab, and only a geo holdout or a
+   conversion-lift test can replace them with measurements.
+   ------------------------------------------------------------------------------ */
+
+/** Class defaults, used whenever the payload carries no incrementality config. */
+var INCREMENTALITY_DEFAULTS = { brand: 0.20, 'private-label': 0.50, generic: 1.00 };
+
+var INCREMENTALITY_CLASSES = ['generic', 'private-label', 'brand'];
+
+/**
+ * Classify a campaign / bidding-strategy name (case-insensitive).
+ *
+ * PRECEDENCE IS DELIBERATE AND ORDER-DEPENDENT — a name can carry more than one marker:
+ *   1. 'brand'          anywhere in the name  -> brand
+ *   2. '-pb-' anywhere, or a trailing '-pb'   -> private-label
+ *   3. everything else                        -> generic
+ *
+ * The real Babyshop strategy `p-shopping-se-pb-generic` contains BOTH '-pb-' AND the
+ * word "generic". Because private label is tested before the generic fallback, it
+ * classifies as private-label — the conservative (lower-incrementality) reading, and the
+ * correct one: it is a private-label campaign whose *keyword theme* is generic.
+ * Likewise `p-shopping-se-brand` is brand even though it is a shopping campaign.
+ */
+function incrementalityClass(name) {
+  var n = String(name == null ? '' : name).toLowerCase();
+  if (n.indexOf('brand') >= 0) return 'brand';                          // 1
+  if (n.indexOf('-pb-') >= 0 || /-pb$/.test(n)) return 'private-label';  // 2
+  return 'generic';                                                      // 3
+}
+
+/**
+ * Resolve one campaign's incrementality factor.
+ *
+ * `cfg` is the payload's `config.incrementality`, exactly as apps-script/webapp.gs emits it:
+ *   { classes:   { brand:0.2, 'private-label':0.5, generic:1.0 },
+ *     overrides: [ { pattern:'p-shopping-se-pb-product', factor:0.65 }, ... ] }
+ *
+ * An override whose pattern occurs in the campaign name beats the class factor; when
+ * several patterns match, the LONGEST (most specific) one wins. Everything is optional —
+ * a missing class, a missing overrides list or a missing `incrementality` block all fall
+ * back to INCREMENTALITY_DEFAULTS, so an older endpoint keeps working unchanged.
+ *
+ * Returns { cls, factor, source:'class'|'override', pattern }.
+ */
+function resolveIncrementality(name, cfg) {
+  var c = cfg || {};
+  var classes = c.classes || {};
+  var cls = incrementalityClass(name);
+  var base = Number(classes[cls]);
+  if (!isFinite(base) || base < 0) base = INCREMENTALITY_DEFAULTS[cls];
+  var out = { cls: cls, factor: base, source: 'class', pattern: null };
+
+  var lower = String(name == null ? '' : name).toLowerCase();
+  var best = null;
+  (c.overrides || []).forEach(function (o) {
+    if (!o || o.pattern == null) return;
+    var p = String(o.pattern).toLowerCase().trim();
+    var f = Number(o.factor);
+    if (!p || !isFinite(f) || f < 0) return;
+    if (lower.indexOf(p) < 0) return;
+    if (!best || p.length > best.pattern.length) best = { pattern: p, factor: f };
+  });
+  if (best) { out.factor = best.factor; out.source = 'override'; out.pattern = best.pattern; }
+  return out;
+}
+
+/**
+ * The iGP3-maximising simulated point at an ARBITRARY incrementality factor.
+ * Drives the sensitivity line: a recommendation for a low-incrementality campaign is only
+ * as good as the factor assumed, so we show, on the real curve, where the optimum sits at
+ * ×1.0, at the class default and at half of it. `netNegative` means no simulated target
+ * makes money at that factor at all — the honest answer is "this campaign does not pay
+ * for itself under that assumption", not a target.
+ */
+function optimumAtFactor(points, factor) {
+  if (!points || !points.length) return null;
+  var best = null;
+  points.forEach(function (p) {
+    var igp3 = p.gp2 * factor - p.cost;
+    if (!best || igp3 > best.igp3) best = { target: p.target, cost: p.cost, gp2: p.gp2, igp3: igp3 };
+  });
+  best.factor = factor;
+  best.netNegative = best.igp3 <= 0;
+  return best;
+}
+
 /* ---------- curve construction ---------- */
 
 /**
@@ -551,7 +672,15 @@ function concaveHull(pts) {
   return h;
 }
 
-/** Marginal-ROAS segments between adjacent points of a cost-ascending list. */
+/**
+ * Marginal-ROAS segments between adjacent points of a cost-ascending list.
+ *
+ * `mRoas` is the INCREMENTAL marginal return (ΔiGP2 / ΔCost) — the one every
+ * recommendation, breakeven and allocation in this file is read off. `mRoasObserved`
+ * (ΔGP2 / ΔCost) is what Google's raw numbers say, kept for display and for the
+ * unadjusted comparison in the portfolio allocator. At factor 1.0 the two are identical,
+ * so generic campaigns behave exactly as they did before incrementality existed.
+ */
 function marginalSegments(pts) {
   var segs = [];
   for (var i = 1; i < pts.length; i++) {
@@ -562,7 +691,9 @@ function marginalSegments(pts) {
       from: a, to: b,
       dCost: dCost,
       dGp2: b.gp2 - a.gp2,
-      mRoas: (b.gp2 - a.gp2) / dCost,
+      dIGp2: b.igp2 - a.igp2,
+      mRoas: (b.igp2 - a.igp2) / dCost,
+      mRoasObserved: (b.gp2 - a.gp2) / dCost,
       costMid: (a.cost + b.cost) / 2,
       targetMid: (a.target + b.target) / 2
     });
@@ -609,65 +740,92 @@ function breakevenTarget(segs) {
  * (e.g. a newly onboarded account still bidding on revenue); set it to that account's
  * gross margin to convert. For every account that sends cart-level profit as its primary
  * conversion value — which is all of Babyshop's — it must stay 1.0.
+ *
+ * `incrementality` is ORTHOGONAL to that multiplier and applies strictly AFTER it:
+ * the multiplier answers "is this number GP2?", incrementality answers "how much of this
+ * GP2 did the ad actually cause?". Chain:  GP2 = value × mult  ->  iGP2 = GP2 × factor.
+ * Cost is never scaled — it is 100% real regardless of class — so iGP3 = iGP2 − cost.
  */
-function buildStrategy(rows, valueToGp2Multiplier) {
+function buildStrategy(rows, valueToGp2Multiplier, incrementality) {
   var mult = valueToGp2Multiplier == null ? 1 : valueToGp2Multiplier;
   var head = rows[0];
+  var inc = incrementality || resolveIncrementality(head.strategy, null);
+  var factor = inc.factor == null || !isFinite(inc.factor) ? 1 : inc.factor;
+  var adjusted = Math.abs(factor - 1) > 1e-9;
   var points = rows.map(function (r) {
     var cost = r.costMicros / 1e6;
     var gp2 = r.convValue * mult;
+    var igp2 = gp2 * factor;
     return {
       target: r.target,
       cost: cost,
       gp2: gp2,
       gp3: gp2 - cost,
+      igp2: igp2,
+      igp3: igp2 - cost,
       conversions: r.conversions,
       clicks: r.clicks,
       impressions: r.impressions,
       // ROAS exactly as Google measures it: reported conversion value over cost,
-      // i.e. the same scale the target ROAS is set on — never multiplier-adjusted.
+      // i.e. the same scale the target ROAS is set on — never multiplier-adjusted
+      // and never incrementality-adjusted.
       roasActual: cost > 0 ? r.convValue / cost : 0
     };
   }).sort(function (a, b) { return a.target - b.target; });
 
+  // Dominance and concavity are unchanged by incrementality: iGP2 is GP2 times a single
+  // positive constant, so the same points survive either way. Both are computed on the raw
+  // GP2 so the frontier stays a statement about Google's data, not about our assumption.
   var byCost = points.slice().sort(function (a, b) { return a.cost - b.cost; });
   var eff = efficientFrontier(byCost);
   var hull = concaveHull(eff);
   var segs = marginalSegments(eff);
   var hullSegs = marginalSegments(hull);
-  var be = breakevenTarget(segs);
+  var be = breakevenTarget(segs);                       // crossing of INCREMENTAL marginal 1.0
 
   // current position: interpolate the curve at the currently configured target
-  var cur = interpAt(points, 'target', head.currentTarget, ['cost', 'gp2', 'gp3']);
+  var cur = interpAt(points, 'target', head.currentTarget, ['cost', 'gp2', 'gp3', 'igp2', 'igp3']);
   var curInRange = head.currentTarget !== null &&
     head.currentTarget >= points[0].target - 1e-9 &&
     head.currentTarget <= points[points.length - 1].target + 1e-9;
 
-  // recommended step: the simulated point with the highest GP3
-  var opt = points.reduce(function (best, p) { return p.gp3 > best.gp3 ? p : best; }, points[0]);
+  // Recommended step: the simulated point with the highest INCREMENTAL GP3. For a generic
+  // campaign (factor 1.0) this is bit-for-bit the old GP3 maximum.
+  var opt = points.reduce(function (best, p) { return p.igp3 > best.igp3 ? p : best; }, points[0]);
+  // The unadjusted GP3 maximum, kept so the observed recommendation stays visible.
+  var optObserved = points.reduce(function (best, p) { return p.gp3 > best.gp3 ? p : best; }, points[0]);
 
   var step = points.length > 1
     ? Math.min.apply(null, points.slice(1).map(function (p, i) { return p.target - points[i].target; }))
     : 0;
 
-  var uplift = cur ? opt.gp3 - cur.gp3 : 0;
+  var uplift = cur ? opt.igp3 - cur.igp3 : 0;
+  var upliftObserved = cur ? optObserved.gp3 - cur.gp3 : 0;
   var costChange = cur ? opt.cost - cur.cost : 0;
   var status = 'optimum';
   if (cur && head.currentTarget !== null) {
     var d = opt.target - head.currentTarget;
-    if (Math.abs(d) <= step / 2 + 1e-9 || Math.abs(uplift) < Math.max(1, Math.abs(cur.gp3) * 0.002)) status = 'optimum';
+    if (Math.abs(d) <= step / 2 + 1e-9 || Math.abs(uplift) < Math.max(1, Math.abs(cur.igp3) * 0.002)) status = 'optimum';
     else if (d > 0) status = 'raise';
     else status = 'lower';
   } else {
     status = 'unknown';
   }
 
+  /* Sensitivity to the assumption itself: the optimum on this very curve at full
+     incrementality, at the factor in force, and at half of it. Rendered for every campaign
+     whose factor is not 1.0, because there the recommendation is a function of a number
+     nobody has measured yet. */
+  var sensitivity = adjusted
+    ? [optimumAtFactor(points, 1), optimumAtFactor(points, factor), optimumAtFactor(points, factor / 2)]
+    : null;
+
   var flags = [];
   if (points.length < 5) flags.push('Only ' + points.length + ' simulation point(s) — curve is coarse.');
   if (!curInRange) flags.push('Current target ' + fmtPct(head.currentTarget) + ' sits outside the simulated range (' +
     fmtPct(points[0].target) + '–' + fmtPct(points[points.length - 1].target) + ').');
-  if (be.side === 'below') flags.push('Marginal ROAS never drops below 1.0 inside the simulated range — the optimum is at a lower target than Google simulated.');
-  if (be.side === 'above') flags.push('Marginal ROAS is below 1.0 across the whole simulated range — every simulated point over-spends.');
+  if (be.side === 'below') flags.push('Marginal ' + (adjusted ? 'incremental ' : '') + 'ROAS never drops below 1.0 inside the simulated range — the optimum is at a lower target than Google simulated.');
+  if (be.side === 'above') flags.push('Marginal ' + (adjusted ? 'incremental ' : '') + 'ROAS is below 1.0 across the whole simulated range — every simulated point over-spends.');
   if (eff.length < byCost.length) flags.push((byCost.length - eff.length) + ' dominated point(s) removed (higher cost, no extra value).');
   if (hull.length < eff.length) flags.push((eff.length - hull.length) + ' point(s) smoothed to keep the curve concave for allocation.');
 
@@ -683,6 +841,11 @@ function buildStrategy(rows, valueToGp2Multiplier) {
     currentTarget: head.currentTarget,
     currentInRange: curInRange,
     valueToGp2Multiplier: mult,
+    incrementality: inc,
+    incFactor: factor,
+    incClass: inc.cls,
+    incAdjusted: adjusted,
+    sensitivity: sensitivity,
     points: points,
     byCost: byCost,
     efficient: eff,
@@ -692,8 +855,10 @@ function buildStrategy(rows, valueToGp2Multiplier) {
     breakeven: be,
     current: cur,
     opt: opt,
+    optObserved: optObserved,
     step: step,
     uplift: uplift,
+    upliftObserved: upliftObserved,
     costChange: costChange,
     status: status,
     flags: flags
@@ -705,8 +870,10 @@ function buildStrategy(rows, valueToGp2Multiplier) {
  * `multipliers` maps account name -> valueToGp2Multiplier; `defaultMultiplier` covers the
  * rest. Both are optional and both default to 1.0 — see buildStrategy() for when the
  * escape hatch is legitimate.
+ * `incrementalityCfg` is the payload's config.incrementality (optional; omitted means the
+ * built-in class defaults apply).
  */
-function buildStrategies(rows, multipliers, defaultMultiplier) {
+function buildStrategies(rows, multipliers, defaultMultiplier, incrementalityCfg) {
   var groups = {};
   rows.forEach(function (r) {
     // JSON key: strategy names repeat across accounts, and no plain-text
@@ -720,7 +887,7 @@ function buildStrategies(rows, multipliers, defaultMultiplier) {
     if (!g.length) return;
     var def = defaultMultiplier == null ? 1 : defaultMultiplier;
     var mult = multipliers && multipliers[g[0].account] != null ? multipliers[g[0].account] : def;
-    out.push(buildStrategy(g, mult));
+    out.push(buildStrategy(g, mult, resolveIncrementality(g[0].strategy, incrementalityCfg)));
   });
   return out.sort(function (a, b) { return (b.current ? b.current.cost : 0) - (a.current ? a.current.cost : 0); });
 }
@@ -735,8 +902,17 @@ function buildStrategies(rows, multipliers, defaultMultiplier) {
  *
  * The floor is the lowest cost Google simulated for each strategy: below that we
  * have no evidence, so we clamp and flag rather than extrapolate.
+ *
+ * The ordering runs on INCREMENTAL marginal return (ΔiGP2 / ΔCost) by default, which is
+ * what moves budget out of brand and private label and into generic: a brand krona that
+ * buys 3.0 of observed GP2 only buys 0.6 of incremental GP2 at factor 0.20, so a generic
+ * krona buying 1.4 outranks it. Pass { observed:true } to run the same allocator on the
+ * unadjusted curves — used only to quantify that shift side by side.
  */
-function allocateBudget(strategies, budget) {
+function allocateBudget(strategies, budget, opts) {
+  var observed = !!(opts && opts.observed);
+  var valueKey = observed ? 'gp2' : 'igp2';
+  var segKey = observed ? 'mRoasObserved' : 'mRoas';
   var usable = strategies.filter(function (s) { return s.hull.length >= 1; });
   var floor = usable.reduce(function (a, s) { return a + s.hull[0].cost; }, 0);
   var ceiling = usable.reduce(function (a, s) { return a + s.hull[s.hull.length - 1].cost; }, 0);
@@ -746,7 +922,7 @@ function allocateBudget(strategies, budget) {
 
   var pool = [];
   usable.forEach(function (s) {
-    s.hullSegments.forEach(function (seg) { pool.push({ name: s.name, mRoas: seg.mRoas, dCost: seg.dCost }); });
+    s.hullSegments.forEach(function (seg) { pool.push({ name: s.name, mRoas: seg[segKey], dCost: seg.dCost }); });
   });
   pool.sort(function (a, b) { return b.mRoas - a.mRoas; });
 
@@ -761,20 +937,26 @@ function allocateBudget(strategies, budget) {
 
   var rowsOut = usable.map(function (s) {
     var cost = alloc[s.name];
-    var at = interpAt(s.hull, 'cost', cost, ['target', 'gp2', 'gp3']);
+    var at = interpAt(s.hull, 'cost', cost, ['target', 'gp2', 'igp2']);
+    var value = at ? at[valueKey] : 0;        // the profit measure this run optimises
     return {
       strategy: s,
       cost: cost,
       target: at ? at.target : s.currentTarget,
       gp2: at ? at.gp2 : 0,
+      igp2: at ? at.igp2 : 0,
       gp3: at ? at.gp2 - cost : 0,
+      igp3: at ? at.igp2 - cost : 0,
+      value: value,
+      value3: value - cost,
       costDelta: cost - (s.current ? s.current.cost : 0),
-      gp3Delta: (at ? at.gp2 - cost : 0) - (s.current ? s.current.gp3 : 0)
+      gp3Delta: (value - cost) - (s.current ? (observed ? s.current.gp3 : s.current.igp3) : 0)
     };
   });
 
   return {
     rows: rowsOut,
+    observed: observed,
     floor: floor,
     ceiling: ceiling,
     budget: budget,
@@ -782,16 +964,26 @@ function allocateBudget(strategies, budget) {
     infeasible: budget < floor - 1e-6,        // budget below the simulated floor
     marginalAtStop: marginalAtStop,
     totalGp2: rowsOut.reduce(function (a, r) { return a + r.gp2; }, 0),
-    totalGp3: rowsOut.reduce(function (a, r) { return a + r.gp3; }, 0),
+    totalIGp2: rowsOut.reduce(function (a, r) { return a + r.igp2; }, 0),
+    totalGp3: rowsOut.reduce(function (a, r) { return a + r.value3; }, 0),
+    totalObservedGp3: rowsOut.reduce(function (a, r) { return a + r.gp3; }, 0),
     totalCost: rowsOut.reduce(function (a, r) { return a + r.cost; }, 0)
   };
 }
 
-/** Total cost implied by every strategy sitting at its own GP3 maximum. */
+/**
+ * Total cost implied by every strategy sitting at its own iGP3 maximum, with the
+ * unadjusted (observed GP3 max) totals alongside for comparison.
+ */
 function unconstrainedOptimum(strategies) {
   return strategies.reduce(function (a, s) {
-    a.cost += s.opt.cost; a.gp2 += s.opt.gp2; a.gp3 += s.opt.gp3; return a;
-  }, { cost: 0, gp2: 0, gp3: 0 });
+    // at the iGP3 optimum
+    a.cost += s.opt.cost; a.gp2 += s.opt.gp2; a.igp2 += s.opt.igp2;
+    a.igp3 += s.opt.igp3; a.gp3AtIOpt += s.opt.gp3;
+    // at the unadjusted GP3 optimum, for the "what we would have said" comparison
+    a.observedCost += s.optObserved.cost; a.observedGp3 += s.optObserved.gp3;
+    return a;
+  }, { cost: 0, gp2: 0, igp2: 0, igp3: 0, gp3AtIOpt: 0, observedCost: 0, observedGp3: 0 });
 }
 
 /* ---------- formatting ---------- */
@@ -810,6 +1002,9 @@ const DEMO_DATA = {
   generatedAt: "2026-08-03T06:15:00Z",
   source: "demo",
   // Conversion value in these accounts is already GP2, so no conversion is needed.
+  // No `incrementality` block on purpose: this exercises the backward-compatible path, where
+  // the dashboard falls back to INCREMENTALITY_DEFAULTS and classifies by name —
+  // p-shopping-se-brand -> brand, *-pb-* -> private-label, everything else -> generic.
   config: { defaultValueToGp2Multiplier: 1, valueToGp2Multipliers: {} },
   columns: ["Customer Name","Bidding Strategy Name","Current Target Roas","Bidding Strategy Id","Start Date","End Date","TARGET ROAS","Conversions","Conversions Value","Clicks","Cost Micros","Impressions","Top Slot Impressions","Current Campaign Strategy","Currency","Run Date"],
   rows: [
@@ -1022,6 +1217,41 @@ function gp2Multipliers(){
   };
 }
 
+/* Incrementality settings from the endpoint payload. Shape (all optional):
+     config: { incrementality: { classes: { brand:0.2, 'private-label':0.5, generic:1.0 },
+                                 overrides: [ { pattern:'p-shopping-se-pb-product', factor:0.65 } ] } }
+   Written by setupConfigTab()/readConfig() in apps-script/webapp.gs — keep the names in
+   sync with that file. A payload without `incrementality` falls back to
+   INCREMENTALITY_DEFAULTS, so older endpoints keep working. */
+function incrementalityCfg(){
+  const cfg = (state.payload && state.payload.config) || {};
+  const inc = cfg.incrementality || {};
+  return {
+    classes: Object.assign({}, INCREMENTALITY_DEFAULTS, inc.classes || {}),
+    overrides: Array.isArray(inc.overrides) ? inc.overrides : [],
+    fromPayload: !!cfg.incrementality
+  };
+}
+
+/** True when any strategy in the selection carries an incrementality factor below 1.0. */
+function anyIncAdjusted(){ return state.strategies.some(s => s.incAdjusted); }
+
+/** Human label for an incrementality factor, e.g. "×0.50". */
+function incLabel(f){ return '×' + f.toFixed(2); }
+
+const CLASS_LABEL = { generic:'Generic', 'private-label':'Private label', brand:'Brand' };
+const CLASS_BLURB = {
+  generic:
+    'Prospecting against open-market demand — the click is the demand, so observed GP2 is taken at ' +
+    'face value. This is where moving targets on the curve genuinely earns money.',
+  'private-label':
+    'Own-label products sold nowhere else. A shopper who wants the product has one place to buy it, ' +
+    'so a large share of this value would convert without the ad — while the cost is 100% real.',
+  brand:
+    'Only matches babyshop / lekmer brand queries. That demand already chose us and mostly arrives ' +
+    'anyway; the spend is largely defensive. Treat these recommendations as directional only.'
+};
+
 /** Accounts in the current selection whose multiplier is not 1.0 — drives the badges. */
 function adjustedAccounts(){
   const seen = {};
@@ -1045,7 +1275,7 @@ function rebuild(resetSelections){
   if (!runs.includes(state.runDate)) state.runDate = runs[runs.length - 1];
 
   const m = gp2Multipliers();
-  state.strategies = buildStrategies(scopedRows(), m.map, m.def);
+  state.strategies = buildStrategies(scopedRows(), m.map, m.def, incrementalityCfg());
   state.strategies.forEach(s => s.key = s.account + ' · ' + s.name);
   state.mixedCurrency = new Set(state.strategies.map(s => s.currency)).size > 1;
 
@@ -1178,39 +1408,46 @@ function renderOverview(){
   const curs = Object.keys(groups).sort();
   const multi = curs.length > 1;
 
+  // Every KPI below is computed on INCREMENTAL GP3. The observed figures are still shown,
+  // as the sub-line of the first two cards, so the haircut is never hidden.
+  const incAdj = anyIncAdjusted();
   document.getElementById('kpiZone').innerHTML = curs.map(cur => {
     const ss = groups[cur];
+    const curIGp3 = ss.reduce((a,s) => a + (s.current ? s.current.igp3 : 0), 0);
     const curGp3  = ss.reduce((a,s) => a + (s.current ? s.current.gp3 : 0), 0);
     const curCost = ss.reduce((a,s) => a + (s.current ? s.current.cost : 0), 0);
     const pot     = unconstrainedOptimum(ss);
-    const inc     = pot.gp3 - curGp3;
-    // A negative current GP3 has no meaningful "share of the maximum" — floor the
+    const inc     = pot.igp3 - curIGp3;
+    // A negative current iGP3 has no meaningful "share of the maximum" — floor the
     // score at 0 and say why, rather than printing a nonsense negative percentage.
-    const scoreRaw  = pot.gp3 > 0 ? curGp3 / pot.gp3 : 0;
+    const scoreRaw  = pot.igp3 > 0 ? curIGp3 / pot.igp3 : 0;
     const score     = Math.max(0, Math.min(1, scoreRaw));
-    const scoreNote = curGp3 < 0
+    const scoreNote = curIGp3 < 0
       ? 'currently loss-making at the current targets'
-      : pot.gp3 <= 0 ? 'no profitable target exists in the simulated range'
-      : 'current GP3 as a share of the achievable maximum';
+      : pot.igp3 <= 0 ? 'no profitable target exists in the simulated range'
+      : 'current ' + (incAdj ? 'incremental ' : '') + 'GP3 as a share of the achievable maximum';
     const costDelta = pot.cost - curCost;
     return `
       <div class="kpi-block">
         ${multi ? `<div class="kpi-cur">${cur} &middot; ${ss.length} strategies</div>` : ''}
         <div class="kpis">
           <div class="kpi">
-            <div class="label">Current GP3 / week</div>
-            <div class="value">${money(curGp3, cur)}</div>
-            <div class="sub">on ${money(curCost, cur)} cost &middot; GP2 ${moneyK(curGp3 + curCost, cur)}</div>
+            <div class="label">Current ${incAdj ? 'incremental ' : ''}GP3 / week</div>
+            <div class="value">${money(curIGp3, cur)}</div>
+            <div class="sub">on ${money(curCost, cur)} cost${incAdj
+              ? ' &middot; observed GP3 ' + moneyK(curGp3, cur)
+              : ' &middot; GP2 ' + moneyK(curGp3 + curCost, cur)}</div>
           </div>
           <div class="kpi">
-            <div class="label">Potential GP3 / week</div>
-            <div class="value">${money(pot.gp3, cur)}</div>
-            <div class="sub">every strategy at its own GP3 max</div>
+            <div class="label">Potential ${incAdj ? 'incremental ' : ''}GP3 / week</div>
+            <div class="value">${money(pot.igp3, cur)}</div>
+            <div class="sub">every strategy at its own ${incAdj ? 'iGP3' : 'GP3'} max${incAdj
+              ? ' &middot; observed GP3 there ' + moneyK(pot.gp3AtIOpt, cur) : ''}</div>
           </div>
           <div class="kpi accent">
             <div class="label">Incremental potential</div>
             <div class="value">${money(inc, cur)}</div>
-            <div class="sub"><span class="delta ${signClass(inc)}">${curGp3 ? (inc/Math.abs(curGp3)*100).toFixed(1) : '0.0'}%</span>
+            <div class="sub"><span class="delta ${signClass(inc)}">${curIGp3 ? (inc/Math.abs(curIGp3)*100).toFixed(1) : '0.0'}%</span>
               <span>cost ${signedMoney(costDelta, cur)}</span></div>
           </div>
           <div class="kpi">
@@ -1234,6 +1471,14 @@ function renderOverview(){
     `<b>Conversion value in these accounts is GP2 (gross profit)</b> — the primary conversion action sends
      cart-level profit, so GP3 = GP2 − ad cost, with no margin applied on top. (Revenue is a separate secondary
      conversion action, which bid simulations do not cover.)${basisNote}
+     ${incAdj ? `<br><b>Recommendations run on incremental GP3 (iGP3), not observed GP3.</b> Brand campaigns only
+     match our own brand queries, and private-label campaigns advertise products sold nowhere else, so much of their
+     conversion value would convert without the ad — while every krona of cost is real. Their GP2 is multiplied by an
+     <b>assumed incrementality factor</b> (${INCREMENTALITY_CLASSES.map(c =>
+        CLASS_LABEL[c].toLowerCase() + ' ' + incLabel(incrementalityCfg().classes[c])).join(', ')}) before any
+     recommendation is read off the curve. These are <b>assumptions, not measurements</b> — a geo holdout or a
+     conversion-lift test is what replaces them — and they are editable in the <span class="mono">Config</span> tab
+     without touching code. Observed GP3 stays visible next to the incremental figure everywhere.` : ''}
      <br><b>Read these as directional step moves.</b> Google’s bid simulator holds everything else constant —
      same budgets, creatives, competitors, seasonality and the same 7-day window it was measured on. It also does not
      reconcile exactly with reported ROAS. Move targets one step at a time, let the strategy re-learn for a week or two,
@@ -1245,18 +1490,39 @@ function renderOverview(){
 
 const STATUS_LABEL = { raise:'Raise target', lower:'Lower target', optimum:'At optimum', unknown:'No current target' };
 
+/** Subtotal row helper: sums the money columns for a list of strategies. */
+function summaryTotals(list){
+  return list.reduce((a,s) => ({
+    cost: a.cost + (s.current?s.current.cost:0),
+    gp3:  a.gp3  + (s.current?s.current.gp3:0),
+    igp3: a.igp3 + (s.current?s.current.igp3:0),
+    max:  a.max  + s.opt.igp3,
+    up:   a.up   + s.uplift,
+    dc:   a.dc   + s.costChange
+  }), { cost:0, gp3:0, igp3:0, max:0, up:0, dc:0 });
+}
+
+/**
+ * One row per strategy, SEGMENTED BY INCREMENTALITY CLASS with its own subtotals.
+ * Order is deliberate — generic first, because that is where curve optimisation genuinely
+ * earns money; private label next; brand last, where the recommendation is directional only.
+ */
 function renderSummaryTable(){
   const ss = state.strategies;
   const el = document.getElementById('summaryTable');
   if (!ss.length){ el.innerHTML = '<tr><td class="empty">No strategies in this selection.</td></tr>'; return; }
+  const incAdj = anyIncAdjusted();
+  const NCOL = 11;
 
+  const G3 = incAdj ? 'iGP3' : 'GP3';
   let html = `<thead><tr>
       <th>Strategy</th><th>Current</th><th>Rec.</th><th>Breakeven</th>
-      <th>Current cost</th><th>Cost change</th><th>Current GP3</th><th>Max GP3</th><th>GP3 uplift</th><th>Status</th>
+      <th>Cost</th><th>&Delta; cost</th><th>GP3 obs.</th>
+      <th>${G3} now</th><th>${G3} max</th><th>${G3} uplift</th><th>Status</th>
     </tr></thead><tbody>`;
 
-  ss.forEach(s => {
-    const cur = s.current || { cost:0, gp3:0 };
+  const rowHtml = s => {
+    const cur = s.current || { cost:0, gp3:0, igp3:0 };
     const be = s.breakeven.target
       ? fmtPct(s.breakeven.target)
       : (s.breakeven.side === 'below' ? '&lt; ' + fmtPct(s.points[0].target)
@@ -1265,32 +1531,59 @@ function renderSummaryTable(){
     const multBadge = Math.abs(s.valueToGp2Multiplier - 1) > 1e-9
       ? ` &nbsp;<span class="pill mult" title="This account reports revenue, not GP2 — its conversion value is multiplied by ${
           s.valueToGp2Multiplier}">${esc(multiplierLabel(s.valueToGp2Multiplier))}</span>` : '';
-    html += `<tr data-strategy="${esc(s.key)}" class="${s.key === state.strategyKey ? 'sel':''}">
+    // badge only when an incrementality factor below 1.0 is being assumed
+    const incBadge = s.incAdjusted
+      ? ` &nbsp;<span class="pill inc" title="Assumed incrementality ${incLabel(s.incFactor)} — ${esc(CLASS_LABEL[s.incClass])} class${
+          s.incrementality.source === 'override' ? ', overridden by pattern &quot;' + esc(s.incrementality.pattern) + '&quot;' : ''
+        }. Editable in the Config tab.">${incLabel(s.incFactor)}</span>` : '';
+    const acct = state.account === '__all' ? esc(s.account) + ' &middot; ' : '';
+    return `<tr data-strategy="${esc(s.key)}" class="${s.key === state.strategyKey ? 'sel':''}">
       <td><div class="strat-cell"><span class="nm">${esc(s.name)}</span>
-        <span class="mt">${esc(s.account)} &middot; ${s.points.length} points &middot; ${esc(s.biddingType || '')}${multBadge}</span></div></td>
+        <span class="mt">${acct}${s.points.length} points &middot; ${esc(s.biddingType || '')}${multBadge}${incBadge}</span></div></td>
       <td>${fmtPct(s.currentTarget)}</td>
-      <td><b>${fmtPct(s.opt.target)}</b></td>
+      <td><b>${fmtPct(s.opt.target)}</b>${s.incAdjusted && s.optObserved.target !== s.opt.target
+        ? `<span class="assumption" style="display:block" title="Where the unadjusted GP3 maximum sits">obs ${fmtPct(s.optObserved.target)}</span>` : ''}</td>
       <td class="mono" style="color:var(--muted)">${be}</td>
       <td>${money(cur.cost, s.currency)}</td>
       <td style="color:var(--muted)">${signedMoney(s.costChange, s.currency)}</td>
-      <td>${money(cur.gp3, s.currency)}</td>
-      <td>${money(s.opt.gp3, s.currency)}</td>
+      <td style="color:var(--muted)" title="Observed GP3 at the current target, before the incrementality haircut">${moneyK(cur.gp3, s.currency)}</td>
+      <td>${money(cur.igp3, s.currency)}</td>
+      <td>${money(s.opt.igp3, s.currency)}</td>
       <td class="num ${signClass(s.uplift, 1)}"><b>${signedMoney(s.uplift, s.currency)}</b></td>
       <td><span class="pill ${s.status}">${STATUS_LABEL[s.status]}</span></td>
     </tr>`;
+  };
+
+  const subtotalHtml = (list, label) => {
+    const curs = [...new Set(list.map(s => s.currency))];
+    if (curs.length !== 1) return `<tr class="sub-row"><td>${label}</td>${'<td></td>'.repeat(NCOL-2)}<td style="color:var(--muted)">mixed currencies</td></tr>`;
+    const c = curs[0], t = summaryTotals(list);
+    return `<tr class="sub-row"><td>${label}</td><td></td><td></td><td></td>
+      <td>${money(t.cost,c)}</td><td style="color:var(--muted)">${signedMoney(t.dc,c)}</td>
+      <td style="color:var(--muted)">${moneyK(t.gp3,c)}</td><td>${money(t.igp3,c)}</td><td>${money(t.max,c)}</td>
+      <td class="num ${signClass(t.up,1)}">${signedMoney(t.up,c)}</td><td></td></tr>`;
+  };
+
+  INCREMENTALITY_CLASSES.forEach(cls => {
+    const list = ss.filter(s => s.incClass === cls);
+    if (!list.length) return;
+    const factors = [...new Set(list.map(s => incLabel(s.incFactor)))].join(' / ');
+    html += `<tr class="sec-row"><td colspan="${NCOL}">
+      <span class="sec-t">${CLASS_LABEL[cls]} &middot; ${list.length} ${list.length === 1 ? 'strategy' : 'strategies'}
+        &middot; incrementality ${factors}${cls === 'generic' ? '' : ' <span class="assumption">(assumed — editable in Config)</span>'}</span>
+      <span class="sec-d">${CLASS_BLURB[cls]}</span></td></tr>`;
+    list.forEach(s => { html += rowHtml(s); });
+    html += subtotalHtml(list, CLASS_LABEL[cls] + ' subtotal');
   });
 
-  // totals only when the whole selection shares one currency
+  // grand total only when the whole selection shares one currency
   const curs = [...new Set(ss.map(s => s.currency))];
   if (curs.length === 1){
     const c = curs[0];
-    const t = ss.reduce((a,s) => ({
-      cost: a.cost + (s.current?s.current.cost:0), gp3: a.gp3 + (s.current?s.current.gp3:0),
-      max: a.max + s.opt.gp3, up: a.up + s.uplift, dc: a.dc + s.costChange
-    }), { cost:0, gp3:0, max:0, up:0, dc:0 });
+    const t = summaryTotals(ss);
     html += `<tr class="total-row"><td>Total (${c})</td><td></td><td></td><td></td>
       <td>${money(t.cost,c)}</td><td style="color:var(--muted)">${signedMoney(t.dc,c)}</td>
-      <td>${money(t.gp3,c)}</td><td>${money(t.max,c)}</td>
+      <td style="color:var(--muted)">${moneyK(t.gp3,c)}</td><td>${money(t.igp3,c)}</td><td>${money(t.max,c)}</td>
       <td class="num ${signClass(t.up,1)}">${signedMoney(t.up,c)}</td><td></td></tr>`;
   }
   el.innerHTML = html + '</tbody>';
@@ -1315,6 +1608,21 @@ function renderTrustFlags(){
     items.push({ t:'Showing a cached snapshot',
       d:'The last successful fetch is being replayed from this browser' + (state.error ? ' because the live fetch failed: ' + state.error : '') + '.' });
 
+  // One aggregate entry, not one per strategy: the factors are a single modelling
+  // assumption applied consistently, and repeating it nine times would drown the real flags.
+  const incAdjList = state.strategies.filter(s => s.incAdjusted);
+  if (incAdjList.length){
+    const byCls = {};
+    incAdjList.forEach(s => { (byCls[s.incClass] = byCls[s.incClass] || []).push(s); });
+    items.push({
+      t: 'Incrementality factors are assumptions, not measurements',
+      d: Object.keys(byCls).map(c => byCls[c].length + ' ' + CLASS_LABEL[c].toLowerCase() +
+          ' strategy/strategies at ' + [...new Set(byCls[c].map(s => incLabel(s.incFactor)))].join('/')).join('; ') +
+        '. Every recommendation for those runs on GP2 × factor. Only a geo holdout or a conversion-lift test can ' +
+        'replace the numbers; until then treat brand and private-label targets as directional. Edit them in the Config tab.'
+    });
+  }
+
   const windows = [...new Set(state.strategies.map(s => s.startDate + ' → ' + s.endDate))];
   if (windows.length > 1)
     items.push({ t:'Strategies were simulated over different windows',
@@ -1334,6 +1642,8 @@ function renderTrustFlags(){
 /* ============================== CHART HELPERS ============================== */
 
 const FONT = { family:'Inter', size:11 };
+/* Muted teal for the observed-GP3 line once it has been demoted behind iGP3. */
+const OBSERVED_GP3_COLOR = '#96c1bd';
 function killChart(key){ if (state.charts[key]){ state.charts[key].destroy(); delete state.charts[key]; } }
 function css(v){ return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
 function axis(title, fmt){
@@ -1346,41 +1656,102 @@ function axis(title, fmt){
 
 function currentStrategy(){ return state.strategies.find(s => s.key === state.strategyKey) || state.strategies[0]; }
 
+/**
+ * The sensitivity line for one campaign: where the iGP3 optimum sits on THIS curve at full
+ * incrementality, at the factor in force, and at half of it. Written out because a
+ * recommendation that swings from 370% to "net-negative" on an unmeasured assumption should
+ * say so on its face rather than hide behind a single number.
+ */
+function sensitivityLine(s){
+  if (!s.sensitivity) return '';
+  const part = o => o == null ? '—'
+    : (o.netNegative ? 'net-negative' : fmtPct(o.target)) + ' <span class="assumption">@' + incLabel(o.factor) + '</span>';
+  return s.sensitivity.map(part).join(' &rarr; ');
+}
+
+function renderIncrementalityBox(s){
+  const box = document.getElementById('stratIncBox');
+  if (!box) return;
+  if (!s || !s.incAdjusted){ box.innerHTML = ''; return; }
+  const src = s.incrementality.source === 'override'
+    ? `pattern override <span class="mono">${esc(s.incrementality.pattern)}</span>`
+    : `${esc(CLASS_LABEL[s.incClass])} class default`;
+  const parts = [];
+  parts.push(`<div class="note" style="margin:14px 0 0">
+    <b>Assumed incrementality ${incLabel(s.incFactor)}</b> — ${esc(CLASS_LABEL[s.incClass])} class, from the ${src};
+    editable in the <span class="mono">Config</span> tab without code changes. Every recommendation on this page for
+    this campaign is read off <b>iGP3 = ${incLabel(s.incFactor)} × GP2 − cost</b>. Cost is never discounted.
+    <br><b>Sensitivity of the optimum to that assumption:</b>
+    <span class="sens">${sensitivityLine(s)}</span>
+    <span class="assumption">— same curve, three assumptions. ${CLASS_BLURB[s.incClass]}</span></div>`);
+  if (s.incClass === 'brand') parts.push(`<div class="note warn" style="margin:10px 0 0">
+    <b>Brand spend is defensive.</b> Competitors bid on our brand terms; conceding the auction hands them a shopper who
+    had already chosen us. Low measured incrementality therefore does <b>not</b> mean "minimise spend" — the counterfactual
+    behind the factor assumes nobody else shows up, which is exactly what brand bidding prevents.
+    Treat everything above as <b>directional only</b> and change brand targets in small steps, ideally alongside an
+    auction-insights and organic-traffic check.</div>`);
+  box.innerHTML = parts.join('');
+}
+
 function renderStrategy(){
   const s = currentStrategy();
   const meta = document.getElementById('stratMeta');
   if (!s){
     meta.innerHTML = ''; killChart('curve'); killChart('marginal');
+    renderIncrementalityBox(null);
+    document.getElementById('curveLegend').innerHTML = '';
     document.getElementById('pointTable').innerHTML = '<tr><td class="empty">No data.</td></tr>';
     return;
   }
   const cur = s.current;
+  const adj = s.incAdjusted;
+  const g3 = adj ? 'iGP3' : 'GP3';
   meta.innerHTML = `
     <div>Current target<b>${fmtPct(s.currentTarget)}</b></div>
     <div>Recommended<b>${fmtPct(s.opt.target)}</b></div>
     <div>Breakeven (interp.)<b>${s.breakeven.target ? fmtPct1(s.breakeven.target) : '—'}</b></div>
-    <div>GP3 uplift<b class="num ${signClass(s.uplift,1)}">${signedMoney(s.uplift, s.currency)}</b></div>
+    <div>${g3} uplift<b class="num ${signClass(s.uplift,1)}">${signedMoney(s.uplift, s.currency)}</b></div>
     <div>Cost change<b class="num ${signClass(s.costChange,1)}">${signedMoney(s.costChange, s.currency)}</b></div>
+    <div>Class<b>${esc(CLASS_LABEL[s.incClass])} ${adj ? incLabel(s.incFactor) : '×1.00'}</b></div>
     <div>Window<b>${s.startDate} &rarr; ${s.endDate}</b></div>`;
+  renderIncrementalityBox(s);
 
   const fmtMoney = v => moneyK(v, s.currency);
 
-  /* ---- curve: GP2 & GP3 vs cost ---- */
+  /* ---- curve: GP2, GP3 and (when the factor bites) iGP3 vs cost ---- */
   killChart('curve');
   const pts = s.byCost;
   const ds = [
     { label:'GP2', data: pts.map(p => ({ x:p.cost, y:p.gp2, t:p.target })), borderColor:css('--gp2'),
       backgroundColor:css('--gp2'), pointRadius:3, pointHoverRadius:5, borderWidth:2, tension:.25, yAxisID:'y' },
-    { label:'GP3', data: pts.map(p => ({ x:p.cost, y:p.gp3, t:p.target })), borderColor:css('--gp3'),
-      backgroundColor:'rgba(13,125,117,.10)', pointRadius:3, pointHoverRadius:5, borderWidth:2.5,
-      tension:.25, fill:true, yAxisID:'y' }
+    /* Observed GP3 stays on the chart even when it is not what we recommend on, but it is
+       demoted to a faint dashed line so the eye lands on iGP3 — which keeps the familiar
+       GP3 teal, because it is the line the recommendation is read off. Purple stays
+       reserved for "current target" and must not be reused for a series. */
+    { label:'GP3', data: pts.map(p => ({ x:p.cost, y:p.gp3, t:p.target })),
+      borderColor: adj ? OBSERVED_GP3_COLOR : css('--gp3'),
+      backgroundColor: adj ? OBSERVED_GP3_COLOR : 'rgba(13,125,117,.10)',
+      pointRadius:3, pointHoverRadius:5,
+      borderWidth: adj ? 1.5 : 2.5, borderDash: adj ? [5,4] : undefined,
+      tension:.25, fill: !adj, yAxisID:'y' }
   ];
+  if (adj) ds.push({ label:'iGP3', data: pts.map(p => ({ x:p.cost, y:p.igp3, t:p.target })),
+    borderColor:css('--gp3'), backgroundColor:'rgba(13,125,117,.10)', pointRadius:3, pointHoverRadius:5,
+    borderWidth:2.5, tension:.25, fill:true, yAxisID:'y' });
   if (cur) ds.push({ label:'Current target ' + fmtPct(s.currentTarget), type:'scatter',
-    data:[{ x:cur.cost, y:cur.gp3, t:s.currentTarget }], borderColor:css('--cur'), backgroundColor:css('--cur'),
-    pointRadius:7, pointHoverRadius:9, pointStyle:'circle', yAxisID:'y' });
+    data:[{ x:cur.cost, y: adj ? cur.igp3 : cur.gp3, t:s.currentTarget }], borderColor:css('--cur'),
+    backgroundColor:css('--cur'), pointRadius:7, pointHoverRadius:9, pointStyle:'circle', yAxisID:'y' });
   ds.push({ label:'Recommended ' + fmtPct(s.opt.target), type:'scatter',
-    data:[{ x:s.opt.cost, y:s.opt.gp3, t:s.opt.target }], borderColor:css('--accent'),
+    data:[{ x:s.opt.cost, y: adj ? s.opt.igp3 : s.opt.gp3, t:s.opt.target }], borderColor:css('--accent'),
     backgroundColor:css('--accent'), pointRadius:8, pointHoverRadius:10, pointStyle:'rectRot', yAxisID:'y' });
+
+  document.getElementById('curveLegend').innerHTML = [
+    '<span><i class="sw" style="background:var(--gp2)"></i>GP2</span>',
+    '<span><i class="sw" style="background:' + (adj ? OBSERVED_GP3_COLOR : 'var(--gp3)') + '"></i>GP3 (observed)</span>',
+    adj ? '<span><i class="sw" style="background:var(--gp3)"></i>iGP3 (incremental, ' + incLabel(s.incFactor) + ')</span>' : '',
+    '<span><i class="sw pt" style="background:var(--cur)"></i>Current target</span>',
+    '<span><i class="sw pt" style="background:var(--accent)"></i>Recommended (' + g3 + ' max)</span>'
+  ].filter(Boolean).join('');
 
   state.charts.curve = new Chart(document.getElementById('chartCurve'), {
     type:'line',
@@ -1397,23 +1768,28 @@ function renderStrategy(){
       },
       scales:{
         x:{ type:'linear', ...axis('Cost (' + s.currency + ') — higher cost means a lower target ROAS', fmtMoney) },
-        y:{ ...axis('GP2 / GP3 (' + s.currency + ')', fmtMoney) }
+        y:{ ...axis('GP2 / GP3' + (adj ? ' / iGP3' : '') + ' (' + s.currency + ')', fmtMoney) }
       }
     }
   });
 
   /* ---- marginal ROAS vs target ---- */
   killChart('marginal');
+  // y is the INCREMENTAL marginal (ΔiGP2/ΔCost); the observed one is drawn faintly beside it
+  // when they differ, so the size of the haircut is visible rather than asserted.
   const segPts = s.segments.map(g => ({ x:g.targetMid*100, y:g.mRoas, a:g.from.target, b:g.to.target,
-    dc:g.dCost, dg:g.dGp2 })).sort((p,q) => p.x - q.x);
+    dc:g.dCost, dg:g.dIGp2, dgo:g.dGp2, mo:g.mRoasObserved })).sort((p,q) => p.x - q.x);
   const xs = segPts.map(p => p.x);
   const xMin = Math.min(...xs, s.currentTarget*100), xMax = Math.max(...xs, s.currentTarget*100);
   const mds = [
-    { label:'Marginal ROAS', data:segPts, borderColor:css('--marg'), backgroundColor:'rgba(180,118,43,.10)',
-      pointRadius:4, pointHoverRadius:6, borderWidth:2.5, tension:.2, fill:false },
+    { label: adj ? 'Marginal iROAS (ΔiGP2/ΔCost)' : 'Marginal ROAS', data:segPts, borderColor:css('--marg'),
+      backgroundColor:'rgba(180,118,43,.10)', pointRadius:4, pointHoverRadius:6, borderWidth:2.5, tension:.2, fill:false },
     { label:'Breakeven 1.0', data:[{x:xMin,y:1},{x:xMax,y:1}], borderColor:'#9aa5b1', borderWidth:1.5,
       borderDash:[6,4], pointRadius:0, fill:false, pointStyle:'line' }
   ];
+  if (adj) mds.push({ label:'Marginal ROAS (observed)',
+    data: segPts.map(p => ({ x:p.x, y:p.mo })), borderColor:'#c9b28a', borderWidth:1.5, borderDash:[4,4],
+    pointRadius:0, fill:false, tension:.2, pointStyle:'line' });
   if (s.breakeven.target) mds.push({ label:'Breakeven target ' + fmtPct1(s.breakeven.target), type:'scatter',
     data:[{ x:s.breakeven.target*100, y:1 }], borderColor:css('--accent'), backgroundColor:css('--accent'),
     pointRadius:8, pointStyle:'rectRot' });
@@ -1434,14 +1810,16 @@ function renderStrategy(){
             ? 'Between ' + fmtPct(c[0].raw.a) + ' and ' + fmtPct(c[0].raw.b) + ' target'
             : 'Target ' + c[0].raw.x.toFixed(0) + '%',
           label: c => c.raw.dc != null
-            ? ['Marginal ROAS ' + c.raw.y.toFixed(3),
-               '+' + money(c.raw.dc, s.currency) + ' cost buys +' + money(c.raw.dg, s.currency) + ' GP2']
+            ? ['Marginal ' + (adj ? 'incremental ' : '') + 'ROAS ' + c.raw.y.toFixed(3) +
+                 (adj ? '  (observed ' + c.raw.mo.toFixed(3) + ')' : ''),
+               '+' + money(c.raw.dc, s.currency) + ' cost buys +' + money(c.raw.dg, s.currency) +
+                 (adj ? ' iGP2 (observed +' + money(c.raw.dgo, s.currency) + ' GP2)' : ' GP2')]
             : 'Marginal ROAS ' + c.raw.y.toFixed(3)
         } }
       },
       scales:{
         x:{ type:'linear', ...axis('Target ROAS (%)', v => v + '%') },
-        y:{ ...axis('Marginal ROAS (ΔGP2 / ΔCost)', v => v.toFixed(1)) }
+        y:{ ...axis('Marginal ROAS (' + (adj ? 'ΔiGP2' : 'ΔGP2') + ' / ΔCost)', v => v.toFixed(1)) }
       }
     }
   });
@@ -1451,18 +1829,23 @@ function renderStrategy(){
   const segByTo = {};
   s.segments.forEach(g => segByTo[g.to.target] = g);
   const kept = new Set(s.efficient.map(p => p.target));
-  let html = `<thead><tr><th>Target ROAS</th><th>Cost</th><th>GP2</th><th>GP3</th>
-    <th>Marginal ROAS</th><th>Conv.</th><th>Clicks</th><th>Impr.</th><th>Actual ROAS</th></tr></thead><tbody>`;
+  let html = `<thead><tr><th>Target ROAS</th><th>Cost</th><th>GP2</th><th>GP3</th>${
+    adj ? '<th>iGP3</th>' : ''}
+    <th>Marginal ${adj ? 'iROAS' : 'ROAS'}</th><th>Conv.</th><th>Clicks</th><th>Impr.</th><th>Actual ROAS</th></tr></thead><tbody>`;
   rows.forEach(p => {
     const g = segByTo[p.target];
     const isOpt = p.target === s.opt.target;
+    const isOptObs = adj && p.target === s.optObserved.target;
     html += `<tr${isOpt ? ' class="sel"':''}>
-      <td>${fmtPct(p.target)}${isOpt ? ' &nbsp;<span class="pill optimum">GP3 max</span>':''}${
+      <td>${fmtPct(p.target)}${isOpt ? ' &nbsp;<span class="pill optimum">' + g3 + ' max</span>':''}${
+        isOptObs && !isOpt ? ' &nbsp;<span class="pill unknown" title="Highest observed GP3 — not the recommendation, which runs on iGP3">GP3 max (obs)</span>':''}${
         kept.has(p.target) ? '' : ' &nbsp;<span class="pill unknown" title="Costs more than a cheaper point for no extra GP2 — excluded from the marginal analysis">dominated</span>'}</td>
       <td>${money(p.cost, s.currency)}</td>
       <td>${money(p.gp2, s.currency)}</td>
-      <td>${money(p.gp3, s.currency)}</td>
-      <td class="mono ${g ? (g.mRoas >= 1 ? 'num pos':'num neg') : ''}">${g ? g.mRoas.toFixed(3) : '—'}</td>
+      <td${adj ? ' style="color:var(--muted)"' : ''}>${money(p.gp3, s.currency)}</td>
+      ${adj ? '<td>' + money(p.igp3, s.currency) + '</td>' : ''}
+      <td class="mono ${g ? (g.mRoas >= 1 ? 'num pos':'num neg') : ''}"${
+        g && adj ? ' title="observed ' + g.mRoasObserved.toFixed(3) + '"' : ''}>${g ? g.mRoas.toFixed(3) : '—'}</td>
       <td>${num(p.conversions,1)}</td><td>${num(p.clicks)}</td><td>${num(p.impressions)}</td>
       <td>${p.roasActual.toFixed(2)}x</td></tr>`;
   });
@@ -1490,22 +1873,31 @@ function renderPortfolio(){
   }
   const currentCost = list.reduce((a,s) => a + (s.current ? s.current.cost : 0), 0);
   const currentGp3  = list.reduce((a,s) => a + (s.current ? s.current.gp3 : 0), 0);
+  const currentIGp3 = list.reduce((a,s) => a + (s.current ? s.current.igp3 : 0), 0);
   if (state.budget == null) state.budget = Math.round(currentCost);
   input.value = Math.round(state.budget);
 
+  const incAdj = anyIncAdjusted();
+  const g3 = incAdj ? 'iGP3' : 'GP3';
+  const baseGp3 = incAdj ? currentIGp3 : currentGp3;
+  // the live allocation, on incremental marginal returns
   const a = allocateBudget(list, state.budget);
+  // the same budget allocated on the unadjusted curves — only to size the shift
+  const aObs = allocateBudget(list, state.budget, { observed:true });
   const optimal = unconstrainedOptimum(list);
 
   document.getElementById('portfolioKpis').innerHTML = `
     <div class="kpis" style="margin-top:4px">
       <div class="kpi"><div class="label">Budget</div><div class="value">${money(a.budget, cur)}</div>
         <div class="sub">current spend ${money(currentCost, cur)}</div></div>
-      <div class="kpi"><div class="label">Projected GP2</div><div class="value">${money(a.totalGp2, cur)}</div>
-        <div class="sub">at the optimal split of that budget</div></div>
-      <div class="kpi accent"><div class="label">Projected GP3</div><div class="value">${money(a.totalGp3, cur)}</div>
-        <div class="sub"><span class="delta ${signClass(a.totalGp3-currentGp3,1)}">${signedMoney(a.totalGp3-currentGp3, cur)}</span>
+      <div class="kpi"><div class="label">Projected ${incAdj ? 'iGP2' : 'GP2'}</div>
+        <div class="value">${money(incAdj ? a.totalIGp2 : a.totalGp2, cur)}</div>
+        <div class="sub">at the optimal split of that budget${incAdj
+          ? ' &middot; observed GP2 ' + moneyK(a.totalGp2, cur) : ''}</div></div>
+      <div class="kpi accent"><div class="label">Projected ${g3}</div><div class="value">${money(a.totalGp3, cur)}</div>
+        <div class="sub"><span class="delta ${signClass(a.totalGp3-baseGp3,1)}">${signedMoney(a.totalGp3-baseGp3, cur)}</span>
           <span>vs today</span></div></div>
-      <div class="kpi"><div class="label">Marginal ROAS at stop</div>
+      <div class="kpi"><div class="label">Marginal ${incAdj ? 'i' : ''}ROAS at stop</div>
         <div class="value">${a.marginalAtStop != null ? a.marginalAtStop.toFixed(2) : '—'}</div>
         <div class="sub">${a.marginalAtStop == null ? 'budget sits at the simulated floor'
           : a.marginalAtStop >= 1 ? 'last krona still profitable' : 'last krona loses money — trim the budget'}</div></div>
@@ -1518,26 +1910,40 @@ function renderPortfolio(){
   if (a.infeasible) notes.push('<b>Budget is below the simulated floor</b> — the split shown is the floor, not your budget.');
   if (a.unspent > 1) notes.push('<b>' + money(a.unspent, cur) + '</b> of the budget could not be placed: every strategy is already at the highest cost Google simulated.');
   notes.push('Unconstrained profit optimum: <b>' + money(optimal.cost, cur) + '</b> of spend for <b>' +
-    money(optimal.gp3, cur) + '</b> GP3.');
+    money(optimal.igp3, cur) + '</b> ' + g3 + '.');
+  /* How much the incrementality haircut actually moves. One line: the same budget, split on
+     incremental marginals versus on the raw ones, measured on brand + private label. */
+  if (incAdj){
+    const lowInc = r => r.strategy.incClass !== 'generic';
+    const sum = rows => rows.filter(lowInc).reduce((x,r) => x + r.cost, 0);
+    const incCost = sum(a.rows), obsCost = sum(aObs.rows);
+    const moved = obsCost - incCost;
+    notes.push('<b>Incrementality shifts ' + money(Math.abs(moved), cur) + '</b> of this budget ' +
+      (moved >= 0 ? 'OUT of' : 'INTO') + ' brand + private label ' + (moved >= 0 ? 'and into' : 'and out of') +
+      ' generic: they get <b>' + money(incCost, cur) + '</b> here against <b>' + money(obsCost, cur) +
+      '</b> under the unadjusted allocation.');
+  }
   document.getElementById('portfolioNote').innerHTML = notes.join(' ');
 
   let html = `<thead><tr><th>Strategy</th><th>Current target</th><th>Allocated target</th>
-    <th>Current cost</th><th>Allocated cost</th><th>Cost change</th><th>Current GP3</th>
-    <th>Projected GP3</th><th>GP3 change</th></tr></thead><tbody>`;
+    <th>Current cost</th><th>Allocated cost</th><th>Cost change</th><th>Current ${g3}</th>
+    <th>Projected ${g3}</th><th>${g3} change</th></tr></thead><tbody>`;
   a.rows.slice().sort((x,y) => y.cost - x.cost).forEach(r => {
     const s = r.strategy;
-    html += `<tr><td>${esc(s.name)}</td>
+    const clsTag = s.incAdjusted
+      ? ` <span class="pill inc" title="${esc(CLASS_LABEL[s.incClass])} — assumed incrementality">${incLabel(s.incFactor)}</span>` : '';
+    html += `<tr><td>${esc(s.name)}${clsTag}</td>
       <td>${fmtPct(s.currentTarget)}</td><td><b>${fmtPct(r.target)}</b></td>
       <td>${money(s.current ? s.current.cost : 0, cur)}</td><td>${money(r.cost, cur)}</td>
       <td style="color:var(--muted)">${signedMoney(r.costDelta, cur)}</td>
-      <td>${money(s.current ? s.current.gp3 : 0, cur)}</td><td>${money(r.gp3, cur)}</td>
+      <td>${money(s.current ? (incAdj ? s.current.igp3 : s.current.gp3) : 0, cur)}</td><td>${money(r.value3, cur)}</td>
       <td class="num ${signClass(r.gp3Delta,1)}"><b>${signedMoney(r.gp3Delta, cur)}</b></td></tr>`;
   });
   html += `<tr class="total-row"><td>Total</td><td></td><td></td>
     <td>${money(currentCost, cur)}</td><td>${money(a.totalCost, cur)}</td>
     <td style="color:var(--muted)">${signedMoney(a.totalCost-currentCost, cur)}</td>
-    <td>${money(currentGp3, cur)}</td><td>${money(a.totalGp3, cur)}</td>
-    <td class="num ${signClass(a.totalGp3-currentGp3,1)}">${signedMoney(a.totalGp3-currentGp3, cur)}</td></tr>`;
+    <td>${money(baseGp3, cur)}</td><td>${money(a.totalGp3, cur)}</td>
+    <td class="num ${signClass(a.totalGp3-baseGp3,1)}">${signedMoney(a.totalGp3-baseGp3, cur)}</td></tr>`;
   document.getElementById('allocTable').innerHTML = html + '</tbody>';
 
   /* ---- spend shift bars ---- */
@@ -1572,18 +1978,18 @@ function renderPortfolio(){
   state.charts.budget = new Chart(document.getElementById('chartBudget'), {
     type:'line',
     data:{ datasets:[
-      { label:'Portfolio GP3', data: sweep, borderColor:css('--gp3'), backgroundColor:'rgba(13,125,117,.10)',
+      { label:'Portfolio ' + g3, data: sweep, borderColor:css('--gp3'), backgroundColor:'rgba(13,125,117,.10)',
         pointRadius:0, borderWidth:2.5, fill:true, tension:.2 },
-      { label:'Today', type:'scatter', data:[{ x:currentCost, y:currentGp3 }],
+      { label:'Today', type:'scatter', data:[{ x:currentCost, y:baseGp3 }],
         borderColor:css('--cur'), backgroundColor:css('--cur'), pointRadius:7 },
       { label:'Selected budget', type:'scatter', data:[{ x:a.totalCost, y:a.totalGp3 }],
         borderColor:css('--accent'), backgroundColor:css('--accent'), pointRadius:8, pointStyle:'rectRot' }
     ] },
     options:{ responsive:true, maintainAspectRatio:false, parsing:false, interaction:{ mode:'nearest', intersect:false },
       plugins:{ legend:{ position:'bottom', labels:{ font:FONT, color:'#6d7986', usePointStyle:true, boxWidth:8, padding:14 } },
-        tooltip:{ callbacks:{ label: c => money(c.raw.y, cur) + ' GP3 at ' + money(c.raw.x, cur) + ' cost' } } },
+        tooltip:{ callbacks:{ label: c => money(c.raw.y, cur) + ' ' + g3 + ' at ' + money(c.raw.x, cur) + ' cost' } } },
       scales:{ x:{ type:'linear', ...axis('Total cost (' + cur + ')', v => moneyK(v, cur)) },
-        y:{ ...axis('Portfolio GP3 (' + cur + ')', v => moneyK(v, cur)) } } }
+        y:{ ...axis('Portfolio ' + g3 + ' (' + cur + ')', v => moneyK(v, cur)) } } }
   });
 }
 
@@ -1594,23 +2000,26 @@ function renderHistory(){
   const runs = runDates(inAcct);
   const note = document.getElementById('historyNote');
   const m = gp2Multipliers();
+  const ic = incrementalityCfg();
+  const incAdj = anyIncAdjusted();
+  const g3 = incAdj ? 'iGP3' : 'GP3';
 
-  // per-run table across all strategies
+  // per-run table across all strategies — same incremental basis as everywhere else
   let rt = `<thead><tr><th>Run date</th><th>Age</th><th>Strategies</th><th>Points</th>
-    <th>Current cost</th><th>Current GP3</th><th>Potential GP3</th><th>Score</th></tr></thead><tbody>`;
+    <th>Current cost</th><th>Current ${g3}</th><th>Potential ${g3}</th><th>Score</th></tr></thead><tbody>`;
   runs.slice().reverse().forEach(d => {
-    const ss = buildStrategies(inAcct.filter(r => r.runDate === d), m.map, m.def);
+    const ss = buildStrategies(inAcct.filter(r => r.runDate === d), m.map, m.def, ic);
     const curs = [...new Set(ss.map(s => s.currency))];
     const c = curs.length === 1 ? curs[0] : null;
     const cost = ss.reduce((a,s) => a + (s.current?s.current.cost:0), 0);
-    const gp3 = ss.reduce((a,s) => a + (s.current?s.current.gp3:0), 0);
+    const gp3 = ss.reduce((a,s) => a + (s.current?s.current.igp3:0), 0);
     const pot = unconstrainedOptimum(ss);
     const age = daysBetween(d, todayIso());
     rt += `<tr><td>${d}${d === state.runDate ? ' &nbsp;<span class="pill optimum">shown</span>':''}</td>
       <td>${age} d</td><td>${ss.length}</td><td>${inAcct.filter(r => r.runDate === d).length}</td>
       <td>${c ? money(cost,c) : 'mixed'}</td><td>${c ? money(gp3,c) : 'mixed'}</td>
-      <td>${c ? money(pot.gp3,c) : 'mixed'}</td>
-      <td>${pot.gp3 > 0 ? (gp3/pot.gp3*100).toFixed(1)+'%' : '—'}</td></tr>`;
+      <td>${c ? money(pot.igp3,c) : 'mixed'}</td>
+      <td>${pot.igp3 > 0 ? (gp3/pot.igp3*100).toFixed(1)+'%' : '—'}</td></tr>`;
   });
   document.getElementById('runTable').innerHTML = rt + '</tbody>';
 
@@ -1630,7 +2039,7 @@ function renderHistory(){
 
   const key = state.strategyKey;
   const series = runs.map(d => {
-    const ss = buildStrategies(inAcct.filter(r => r.runDate === d), m.map, m.def);
+    const ss = buildStrategies(inAcct.filter(r => r.runDate === d), m.map, m.def, ic);
     return ss.find(s => s.account + ' · ' + s.name === key) || null;
   });
   const cur = (series.find(Boolean) || {}).currency || 'SEK';
@@ -1643,7 +2052,7 @@ function renderHistory(){
       { label:'Current target (%)', yAxisID:'y1', data: series.map(s => s && s.currentTarget != null ? s.currentTarget*100 : null),
         borderColor:css('--cur'), backgroundColor:css('--cur'), borderWidth:2, borderDash:[5,4], tension:.25, pointRadius:3, spanGaps:true },
       // GP2 blue here, not GP3 teal: the target lines already own the accent colour
-      { label:'Current GP3', yAxisID:'y2', data: series.map(s => s && s.current ? s.current.gp3 : null),
+      { label:'Current ' + g3, yAxisID:'y2', data: series.map(s => s && s.current ? s.current.igp3 : null),
         borderColor:css('--gp2'), backgroundColor:'rgba(59,110,165,.10)', borderWidth:2, tension:.25, pointRadius:3, fill:true, spanGaps:true }
     ] },
     options:{ responsive:true, maintainAspectRatio:false, interaction:{ mode:'index', intersect:false },
@@ -1653,7 +2062,7 @@ function renderHistory(){
           : c.dataset.label + ': ' + c.parsed.y.toFixed(0) + '%' } } },
       scales:{ x:{ grid:{ display:false }, border:{ display:false }, ticks:{ font:FONT, color:'#6d7986' } },
         y1:{ position:'left', ...axis('Target ROAS (%)', v => v + '%') },
-        y2:{ position:'right', ...axis('GP3 (' + cur + ')', v => moneyK(v, cur)), grid:{ display:false } } } }
+        y2:{ position:'right', ...axis(g3 + ' (' + cur + ')', v => moneyK(v, cur)), grid:{ display:false } } } }
   });
 }
 
