@@ -950,8 +950,13 @@ function cacheWrite(payload){
   catch(e){ /* quota */ }
 }
 
+/* How many run-date snapshots to request. 30 keeps the trend view useful while
+   holding the payload well under the endpoint's row cap (~600 rows/run). */
+const FETCH_RUNS = 30;
+
 async function fetchLive(){
-  const url = DATA_ENDPOINT + (DATA_ENDPOINT.indexOf('?') >= 0 ? '&' : '?') + 'token=' + encodeURIComponent(DATA_TOKEN);
+  const url = DATA_ENDPOINT + (DATA_ENDPOINT.indexOf('?') >= 0 ? '&' : '?') + 'token=' + encodeURIComponent(DATA_TOKEN)
+    + '&runs=' + FETCH_RUNS;
   const res = await fetch(url, { method: 'GET', redirect: 'follow' });
   if (!res.ok) throw new Error('HTTP ' + res.status);
   const json = await res.json();

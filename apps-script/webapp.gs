@@ -176,9 +176,19 @@ function readRaw(ss, params) {
     numericIdx.forEach(function (i) { r[i] = toNumber(r[i]); });
   });
 
+  /* Cap the payload by WHOLE runs, dropping the oldest first, so a partially
+     transferred run can never skew a trend point — and so runDates always
+     describes exactly the rows returned. */
   var truncated = false;
-  if (body.length > MAX_ROWS) {
-    body = body.slice(-MAX_ROWS);   // keep the newest, they sit at the bottom
+  if (runIdx >= 0) {
+    while (body.length > MAX_ROWS && runDates.length > 1) {
+      var dropDate = runDates.shift();
+      body = body.filter(function (r) { return r[runIdx] !== dropDate; });
+      truncated = true;
+    }
+  }
+  if (body.length > MAX_ROWS) {   // no Run Date column, or a single oversized run
+    body = body.slice(-MAX_ROWS);
     truncated = true;
   }
 

@@ -90,7 +90,7 @@ var RUN_DATE_COL = HEADERS.indexOf('Run Date') + 1;   // 1-based, for pruning
 var ARG_SEPARATOR = '||';
 /* Written as escapes on purpose: this file gets copy-pasted into the Google Ads
    script editor, where a literal control character would not survive the trip. */
-var ROW_SEPARATOR  = '\u00A4';   // currency sign - never appears in Ads data
+var ROW_SEPARATOR  = '\u001E';   // ASCII record separator - untypeable in Ads entity names
 var CELL_SEPARATOR = '\u001F';   // ASCII unit separator
 
 /* ========================== ENTRY POINTS ========================== */
@@ -99,7 +99,7 @@ function main() {
   if (!CONFIG.SPREADSHEET_URL) {
     throw new Error('Set CONFIG.SPREADSHEET_URL before running this script.');
   }
-  var runDate = todayInAccountTimezone();
+  var runDate = todayInManagerTimezone();
   Logger.log('GP3 simulation collector — run date ' + runDate);
 
   var accountIds = CONFIG.ACCOUNT_IDS.map(function (id) { return String(id).trim(); })
@@ -136,10 +136,20 @@ function collectSimulations(packedArgs) {
     if (includeCampaigns) rows = rows.concat(campaignSimulations(runDate, verbose));
   } catch (e) {
     Logger.log('ERROR in ' + AdsApp.currentAccount().getName() + ': ' + e);
-    return '';
+    throw e;   // surface as ERROR in the callback instead of a silent empty account
   }
   Logger.log(AdsApp.currentAccount().getName() + ': ' + rows.length + ' simulation point(s).');
-  return encodeRows(rows);
+
+  /* executeInParallel caps each child's return string (~100 KB). Trim on a row
+     boundary rather than let a mid-row cut corrupt the whole snapshot. */
+  var encoded = encodeRows(rows);
+  if (encoded.length > 90000) {
+    var cut = encoded.lastIndexOf(ROW_SEPARATOR, 90000);
+    Logger.log('WARNING ' + AdsApp.currentAccount().getName() + ': payload ' + encoded.length +
+      ' chars exceeds the parallel-return cap; dropping rows beyond char ' + cut + '.');
+    encoded = encoded.slice(0, cut);
+  }
+  return encoded;
 }
 
 /* ========================== COLLECTORS ========================== */
@@ -291,7 +301,7 @@ function accountInfo() {
 function buildRow(customer, entity, point, runDate) {
   return [
     customer.name,
-    String(entity.name || '').replace(/[,\r\n]+/g, ';'),   // keep the cell on one line
+    String(entity.name || '').replace(/[,\r\n\u001E\u001F]+/g, ';'),   // one line, no separator collisions
     entity.currentTarget == null ? '' : Number(entity.currentTarget),
     String(entity.id == null ? '' : entity.id),
     entity.startDate || '',
@@ -330,6 +340,10 @@ function decodeRows(str) {
   return str.split(ROW_SEPARATOR).filter(function (s) { return s.length > 0; })
     .map(function (line) {
       var cells = line.split(CELL_SEPARATOR);
+      /* Pad or trim to exactly HEADERS.length: one malformed row must not be
+         able to abort the whole setValues() write. */
+      while (cells.length < HEADERS.length) cells.push('');
+      if (cells.length > HEADERS.length) cells.length = HEADERS.length;
       // numeric columns come back as strings; restore them so the sheet sorts and sums
       return cells.map(function (c, i) {
         if (i >= 6 && i <= 12) { var n = Number(c); return c !== '' && !isNaN(n) ? n : c; }
@@ -343,7 +357,6 @@ function decodeRows(str) {
 
 /** Callback: runs once in the MCC after every account has reported. */
 function writeSnapshot(results) {
-  var runDate = todayInAccountTimezone();
   var allRows = [];
   for (var i = 0; i < results.length; i++) {
     if (results[i].getStatus() !== 'OK') {
@@ -358,11 +371,16 @@ function writeSnapshot(results) {
     return;
   }
 
+  /* Derive the run date from the rows themselves: recomputing it from the
+     clock here can disagree with the children when a run straddles midnight. */
+  var runDate = String(allRows[0][RUN_DATE_COL - 1]);
+
   var sheet = openSheet();
+  var tz = sheet.getParent().getSpreadsheetTimeZone();
   ensureHeaders(sheet);
-  removeRunDate(sheet, runDate);            // makes a same-day re-run idempotent
+  removeRunDate(sheet, runDate, tz);        // makes a same-day re-run idempotent
   appendRows(sheet, allRows);
-  pruneOldRows(sheet, runDate);
+  pruneOldRows(sheet, runDate, tz);
 
   Logger.log('Appended ' + allRows.length + ' row(s) for ' + runDate +
     '. Sheet now holds ' + Math.max(0, sheet.getLastRow() - 1) + ' data row(s).');
@@ -378,32 +396,47 @@ function openSheet() {
   return sheet;
 }
 
-/** Write the header row if the tab is empty. Never rewrites an existing header. */
+/** Write the header row if the tab is empty; refuse to write under a foreign one. */
 function ensureHeaders(sheet) {
-  if (sheet.getLastRow() !== 0) return;
-  sheet.getRange(1, 1, 1, HEADERS.length).setValues([HEADERS]).setFontWeight('bold');
-  sheet.setFrozenRows(1);
-  Logger.log('Bootstrapped header row.');
+  if (sheet.getLastRow() === 0) {
+    sheet.getRange(1, 1, 1, HEADERS.length).setValues([HEADERS]).setFontWeight('bold');
+    sheet.setFrozenRows(1);
+    Logger.log('Bootstrapped header row.');
+    return;
+  }
+  var existing = sheet.getRange(1, 1, 1, HEADERS.length).getValues()[0];
+  for (var i = 0; i < HEADERS.length; i++) {
+    if (String(existing[i]).trim() !== HEADERS[i]) {
+      throw new Error('Header mismatch in "' + sheet.getName() + '" column ' + (i + 1) +
+        ': expected "' + HEADERS[i] + '", found "' + existing[i] +
+        '". Rows are written positionally, so a mismatched header would corrupt ' +
+        'every consumer - fix or clear the tab before running again.');
+    }
+  }
 }
 
 function appendRows(sheet, rows) {
   var startRow = Math.max(sheet.getLastRow(), 1) + 1;
+  var lastNeeded = startRow + rows.length - 1;
+  if (sheet.getMaxRows() < lastNeeded) {   // getRange() never grows the grid itself
+    sheet.insertRowsAfter(sheet.getMaxRows(), lastNeeded - sheet.getMaxRows());
+  }
   sheet.getRange(startRow, 1, rows.length, HEADERS.length).setValues(rows);
 }
 
 /** Delete rows whose Run Date equals runDate, so today's run replaces itself. */
-function removeRunDate(sheet, runDate) {
-  deleteRowsWhere(sheet, function (value) { return normaliseDate(value) === runDate; },
+function removeRunDate(sheet, runDate, tz) {
+  deleteRowsWhere(sheet, function (value) { return normaliseDate(value, tz) === runDate; },
     'same-day re-run');
 }
 
 /** Delete rows whose Run Date is older than the retention window. */
-function pruneOldRows(sheet, runDate) {
+function pruneOldRows(sheet, runDate, tz) {
   var cutoff = new Date(runDate + 'T00:00:00Z');
   cutoff.setUTCDate(cutoff.getUTCDate() - CONFIG.LOOKBACK_PRUNE_DAYS);
   var cutoffIso = Utilities.formatDate(cutoff, 'UTC', 'yyyy-MM-dd');
   deleteRowsWhere(sheet, function (value) {
-    var d = normaliseDate(value);
+    var d = normaliseDate(value, tz);
     return d !== '' && d < cutoffIso;
   }, 'older than ' + cutoffIso);
 }
@@ -436,13 +469,16 @@ function deleteRowsWhere(sheet, predicate, reason) {
 
 /* ========================== DATES ========================== */
 
-function todayInAccountTimezone() {
-  return Utilities.formatDate(new Date(), AdsApp.currentAccount().getTimeZone(), 'yyyy-MM-dd');
+function todayInManagerTimezone() {
+  return Utilities.formatDate(new Date(), AdsManagerApp.currentAccount().getTimeZone(), 'yyyy-MM-dd');
 }
 
-/** Sheet cells may hold a Date object or a string; compare as yyyy-MM-dd. */
-function normaliseDate(value) {
-  if (value instanceof Date) return Utilities.formatDate(value, 'UTC', 'yyyy-MM-dd');
+/** Sheet cells may hold a Date object or a string; compare as yyyy-MM-dd.
+    Sheets stores our written date strings as date-typed cells - instants at
+    midnight in the SPREADSHEET's timezone - so they must be formatted back in
+    that same timezone or the day shifts (e.g. to yesterday in UTC). */
+function normaliseDate(value, tz) {
+  if (value instanceof Date) return Utilities.formatDate(value, tz, 'yyyy-MM-dd');
   var s = String(value == null ? '' : value).trim();
   var m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
   return m ? m[0] : '';
