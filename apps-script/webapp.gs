@@ -27,6 +27,20 @@
  *   are ASSUMPTIONS until a geo holdout or conversion-lift test measures them, which is
  *   exactly why they live in a spreadsheet cell and not in code.
  *
+ * IMPRESSION SHARE -> DYNAMIC INCREMENTALITY
+ *   The flat class factors above are a prior, not a measurement, and they are the same
+ *   number for a brand campaign holding 99% absolute-top impression share as for one
+ *   being outbid daily. The "Shares" tab (also written by the Ads script) carries
+ *   last-7-days search / top / absolute-top impression share per campaign, and this
+ *   endpoint serves it as `payload.shares`. The dashboard derives
+ *     headroom h = 1 - (abs top IS for brand | search IS for private label)
+ *     factor    = floor + (cap - floor) x h,  clamped to [floor, cap]
+ *   using the floors and caps seeded in the Config tab as RESERVED keys
+ *   ("brand-floor", "brand-cap", "private-label-floor", "private-label-cap") and served
+ *   as `config.incrementality.shareWeights`. Reserved keys are matched exactly like class
+ *   names and are never treated as campaign-name patterns. A campaign with no share data
+ *   falls back to the flat class factor; generic is never share-adjusted.
+ *
  * DEPLOY
  *   1. Open the spreadsheet → Extensions → Apps Script.
  *   2. Paste this file over Code.gs. Save.
@@ -35,7 +49,8 @@
  *   4. Run setupConfigTab() once from the editor to create the Config tab and
  *      grant the authorisation prompts. The defaults (multiplier 1.0) are correct
  *      unless an account reports revenue instead of GP2. It also seeds the three
- *      incrementality rows; re-running it later is safe and never overwrites edits.
+ *      incrementality class rows and the four impression-share bound rows; re-running it
+ *      later is safe, adds only missing rows, and never overwrites edits.
  *   5. Deploy → New deployment → type "Web app".
  *        Description:   gp3-dashboard-api
  *        Execute as:    Me            (so viewers need no access to the sheet)
@@ -52,8 +67,9 @@
  *
  * QUERY PARAMETERS
  *   token    required, must equal SCRIPT_TOKEN
- *   runs     optional, keep only the N most recent Run Dates (e.g. runs=4)
- *   account  optional, exact Customer Name filter
+ *   runs     optional, keep only the N most recent Run Dates (e.g. runs=4). Applies to the
+ *            Shares tab too; without it, `shares` carries the latest run date only.
+ *   account  optional, exact Customer Name filter (applies to both tabs)
  *
  * SECURITY
  *   The token is a deterrent, not authentication: it travels in a URL that
@@ -68,6 +84,13 @@ var SCRIPT_TOKEN = 'CHANGE-ME';
 
 /** Tab holding the appended simulation snapshots. */
 var RAW_SHEET = 'Raw';
+
+/**
+ * Tab holding the appended per-campaign impression-share snapshots. Optional: if the
+ * Ads script has not written it yet (or runs with COLLECT_SHARES off), the payload
+ * carries `shares: null` and the dashboard falls back to flat class factors.
+ */
+var SHARES_SHEET = 'Shares';
 
 /**
  * Tab holding both config blocks, side by side as two independent column pairs:
@@ -106,6 +129,33 @@ var INCREMENTALITY_CLASS_ALIASES = {
   generic: 'generic'
 };
 
+/**
+ * Floor and cap of the impression-share-derived factor per class. The factor slides
+ * linearly between them with the campaign's auction headroom:
+ *   brand         0.10 - 0.60  read off ABSOLUTE TOP impression share
+ *   private-label 0.40 - 1.00  read off SEARCH impression share
+ * A campaign that already owns the auction sits at the floor (marginal spend buys
+ * almost nothing incremental); one with everything left to win sits at the cap.
+ * Keep in sync with INCREMENTALITY_SHARE_DEFAULTS in index.html.
+ */
+var DEFAULT_SHARE_WEIGHTS = {
+  brand: { floor: 0.10, cap: 0.60 },
+  'private-label': { floor: 0.40, cap: 1.00 }
+};
+
+/**
+ * RESERVED keys in the incrementality column pair. These configure the floors and caps
+ * above and are matched after canon() exactly like the class names, so they can never be
+ * mistaken for a campaign-name pattern override. Deliberately short, for the same reason
+ * as INCREMENTALITY_CLASS_ALIASES: a loose alias here would silently swallow an override.
+ */
+var INCREMENTALITY_SHARE_KEYS = {
+  brandfloor: { cls: 'brand', bound: 'floor' },
+  brandcap: { cls: 'brand', bound: 'cap' },
+  privatelabelfloor: { cls: 'private-label', bound: 'floor' },
+  privatelabelcap: { cls: 'private-label', bound: 'cap' }
+};
+
 /** Hard cap on returned rows, newest run dates first. */
 var MAX_ROWS = 20000;
 
@@ -134,7 +184,8 @@ function doGet(e) {
       rows: raw.rows,
       rowCount: raw.rows.length,
       runDates: raw.runDates,
-      truncated: raw.truncated
+      truncated: raw.truncated,
+      shares: readShares(ss, params)     // null when the tab does not exist yet
     });
   } catch (err) {
     return json({ error: String(err && err.message ? err.message : err) });
@@ -238,34 +289,108 @@ function readRaw(ss, params) {
 }
 
 /**
+ * Read the Shares tab as { columns, rows, runDates } — the same compact shape as the Raw
+ * tab, so the dashboard maps both by header name.
+ *
+ * Returns null when the tab is missing or holds no data rows. That is a NORMAL state (the
+ * Ads script may predate the Shares tab, or run with COLLECT_SHARES off) and the dashboard
+ * treats it as "no share data" and falls back to flat class incrementality factors — it is
+ * never an error.
+ *
+ * Only the most recent run date is returned by default: a factor derived from three-week-old
+ * impression share would be worse than the flat prior it replaces. `runs=N` widens that to
+ * the N most recent run dates, matching the Raw tab, so a client can align share data with
+ * historical snapshots. The `account` filter applies here too.
+ */
+function readShares(ss, params) {
+  var sheet = ss.getSheetByName(SHARES_SHEET);
+  if (!sheet) return null;
+
+  var lastRow = sheet.getLastRow();
+  var lastCol = sheet.getLastColumn();
+  if (lastRow < 2 || lastCol < 1) return null;
+
+  var values = sheet.getRange(1, 1, lastRow, lastCol).getDisplayValues();
+  var columns = values[0].map(function (h) { return String(h).trim(); });
+  var body = values.slice(1).filter(function (r) { return r.join('').trim().length > 0; });
+
+  var acctIdx = indexOfHeader(columns, 'Customer Name');
+  if (params.account && acctIdx >= 0) {
+    var wanted = String(params.account).trim();
+    body = body.filter(function (r) { return String(r[acctIdx]).trim() === wanted; });
+  }
+
+  var runIdx = indexOfHeader(columns, 'Run Date');
+  var runDates = [];
+  if (runIdx >= 0) {
+    body.forEach(function (r) { r[runIdx] = normaliseDate(r[runIdx]); });
+    var seen = {};
+    body.forEach(function (r) { if (r[runIdx] && !seen[r[runIdx]]) { seen[r[runIdx]] = true; runDates.push(r[runIdx]); } });
+    runDates.sort();
+
+    var limit = parseInt(params.runs, 10);
+    if (!(limit > 0)) limit = 1;                 // default: the latest snapshot only
+    if (runDates.length > limit) {
+      var keep = {};
+      runDates.slice(-limit).forEach(function (d) { keep[d] = true; });
+      body = body.filter(function (r) { return keep[r[runIdx]]; });
+      runDates = runDates.slice(-limit);
+    }
+  }
+
+  /* Impression shares come back from getDisplayValues() as "12,34%" / "0,99" depending on
+     the sheet's locale and number format. toShare() hands the client a fraction, or an
+     empty string when the cell is blank — blank must survive as blank, because 0 would
+     read as "no headroom left" instead of "no data". */
+  var shareIdx = ['Search IS', 'Top IS', 'Abs Top IS']
+    .map(function (h) { return indexOfHeader(columns, h); })
+    .filter(function (i) { return i >= 0; });
+  body.forEach(function (r) {
+    shareIdx.forEach(function (i) { r[i] = toShare(r[i]); });
+  });
+
+  if (!body.length) return null;
+  if (body.length > MAX_ROWS) body = body.slice(-MAX_ROWS);
+  return { columns: columns, rows: body, runDates: runDates };
+}
+
+/**
  * Read the Config tab into
  *   {
  *     valueToGp2Multipliers: { account: number },
  *     defaultValueToGp2Multiplier: number,
  *     incrementality: {
- *       classes:   { brand: number, 'private-label': number, generic: number },
- *       overrides: [ { pattern: string, factor: number }, ... ]
+ *       classes:      { brand: number, 'private-label': number, generic: number },
+ *       overrides:    [ { pattern: string, factor: number }, ... ],
+ *       shareWeights: { brand: { floor, cap }, 'private-label': { floor, cap } }
  *     }
  *   }
  * Every key is consumed under exactly these names by index.html — keep them in sync.
  *
  * Columns A/B carry the account -> GP2 multiplier pair; columns D/E carry the
  * incrementality pair. A D-cell matching a class name ("brand", "private-label"/"pb",
- * "generic") sets that class's factor; anything else is treated as a CAMPAIGN NAME
+ * "generic") sets that class's factor; a D-cell matching one of the RESERVED share keys
+ * ("brand-floor", "brand-cap", "private-label-floor", "private-label-cap") sets a bound of
+ * the impression-share-derived factor; anything else is treated as a CAMPAIGN NAME
  * PATTERN override, matched case-insensitively as a substring of the campaign name, with
  * the longest matching pattern winning. Rows with an empty key or an unparseable factor
  * are skipped, so free-text comment rows in the tab are harmless.
  *
- * An empty or missing Config tab yields multiplier 1.0 and DEFAULT_INCREMENTALITY.
+ * An empty or missing Config tab yields multiplier 1.0, DEFAULT_INCREMENTALITY and
+ * DEFAULT_SHARE_WEIGHTS.
  */
 function readConfig(ss) {
   var classes = {};
   Object.keys(DEFAULT_INCREMENTALITY).forEach(function (k) { classes[k] = DEFAULT_INCREMENTALITY[k]; });
+  var shareWeights = {};
+  Object.keys(DEFAULT_SHARE_WEIGHTS).forEach(function (k) {
+    shareWeights[k] = { floor: DEFAULT_SHARE_WEIGHTS[k].floor, cap: DEFAULT_SHARE_WEIGHTS[k].cap };
+  });
 
   var out = {
     valueToGp2Multipliers: {},
     defaultValueToGp2Multiplier: DEFAULT_VALUE_TO_GP2_MULTIPLIER,
-    incrementality: { classes: classes, overrides: [] }
+    incrementality: { classes: classes, overrides: [], shareWeights: shareWeights }
   };
   var sheet = ss.getSheetByName(CONFIG_SHEET);
   if (!sheet || sheet.getLastRow() < 2) return out;
@@ -290,8 +415,11 @@ function readConfig(ss) {
     if (!key) continue;
     var factor = toFactor(values[i][4]);
     if (factor === null) continue;              // comment row, or an unreadable factor
-    var cls = INCREMENTALITY_CLASS_ALIASES[canon(key)];
+    var canonKey = canon(key);
+    var cls = INCREMENTALITY_CLASS_ALIASES[canonKey];
+    var bound = INCREMENTALITY_SHARE_KEYS[canonKey];
     if (cls) out.incrementality.classes[cls] = factor;
+    else if (bound) out.incrementality.shareWeights[bound.cls][bound.bound] = factor;
     else out.incrementality.overrides.push({ pattern: key, factor: factor });
   }
   return out;
@@ -367,6 +495,32 @@ function toFactor(v) {
   return n > 1 ? null : n;
 }
 
+/**
+ * Parse an impression-share cell into a fraction in [0,1], or '' when there is no data.
+ *
+ * Google reports these metrics bucketed at the extremes — "< 10%" arrives as 0.0999 and
+ * anything above 90% as a value just over 0.9 — and they are passed through as-is; the
+ * bucketing is a caveat to document, not something to smooth away.
+ *
+ * A blank cell stays blank and a literal 0 is normalised to blank, because both mean the
+ * same thing downstream: NO DATA, fall back to the flat class factor. Deriving headroom
+ * from a 0 would claim "everything left to win" for a campaign we simply cannot see.
+ */
+function toShare(v) {
+  if (typeof v === 'number') return isFinite(v) && v > 0 ? Math.min(v, 1) : '';
+  var s = String(v == null ? '' : v).trim();
+  if (!s) return '';
+
+  /* Parsed here rather than through toNumber(): a share is never >= 1000, so a comma in
+     one of these cells is ALWAYS a decimal mark. toNumber's thousands-separator heuristic
+     would read the sv-SE display value "0,999" as 999. */
+  var isPercent = s.indexOf('%') >= 0;
+  var n = parseFloat(s.replace(/%/g, '').replace(/\s/g, '').replace(/,/g, '.'));
+  if (!isFinite(n) || n <= 0) return '';
+  if (isPercent || n > 1) n = n / 100;      // "12,34%" and a bare "93" both mean 93% scale
+  return n > 1 ? 1 : n;
+}
+
 /** Sheet dates may be Date objects or locale strings; emit yyyy-MM-dd. */
 function normaliseDate(v) {
   if (v instanceof Date) return Utilities.formatDate(v, 'UTC', 'yyyy-MM-dd');
@@ -394,7 +548,11 @@ function pad(n) { return ('0' + n).slice(-2); }
 /**
  * Run once from the Apps Script editor. Creates the Config tab (if missing), pre-fills it
  * with the accounts already present in the Raw tab (each at multiplier 1), and seeds the
- * three incrementality class rows.
+ * three incrementality class rows plus the four reserved impression-share bound rows
+ * (brand-floor / brand-cap / private-label-floor / private-label-cap).
+ *
+ * Re-run it after upgrading this file: seeding is idempotent per key, so an existing tab
+ * gains only the rows it is missing and every edited factor survives untouched.
  *
  * The A/B pair is an escape hatch, not a required step: it exists only so an account whose
  * conversion value is revenue rather than GP2 can be converted with its gross margin.
@@ -445,15 +603,22 @@ function setupConfigTab() {
   Logger.log('Config tab ready. Leave every multiplier at 1 unless an account reports ' +
     'revenue instead of GP2 as its conversion value; then set that account\'s gross margin. ' +
     'Incrementality factors live in columns D/E and ARE meant to be edited — they are ' +
-    'assumptions until a geo holdout or conversion-lift test measures them. ' +
-    'Deploy the web app afterwards.');
+    'assumptions until a geo holdout or conversion-lift test measures them - and for brand ' +
+    'and private label they are only the FALLBACK, used when a campaign has no impression-share ' +
+    'data; otherwise the factor slides between the floor and cap rows with the campaign\'s ' +
+    'auction headroom. Deploy the web app afterwards.');
 }
 
 /**
- * Seed columns D–F of the Config tab: one row per incrementality class plus a comment row
- * documenting per-campaign overrides. Done as a separate column pair rather than a section
- * in column A so a class name can never collide with an account name, and so the two
- * blocks can be edited independently. Never touches a cell that already has a value.
+ * Seed columns D–F of the Config tab: one row per incrementality class, one row per
+ * impression-share bound, plus a comment row documenting per-campaign overrides. Done as a
+ * separate column pair rather than a section in column A so a class name can never collide
+ * with an account name, and so the two blocks can be edited independently.
+ *
+ * Idempotent PER KEY: every seed row whose key is already present (compared with canon(),
+ * so "Private Label" counts as "private-label") is skipped, and only the missing ones are
+ * appended. That is what lets an existing installation pick up the four new share-weight
+ * rows on a re-run without any of the operator's edited factors being touched.
  */
 function seedIncrementalityRows(sheet) {
   if (sheet.getMaxColumns() < 6) sheet.insertColumnsAfter(sheet.getMaxColumns(), 6 - sheet.getMaxColumns());
@@ -464,36 +629,69 @@ function seedIncrementalityRows(sheet) {
       .setFontWeight('bold');
   }
 
-  var lastRow = sheet.getLastRow();
+  var present = {};
   var hasAny = false;
+  var lastRow = sheet.getLastRow();
   if (lastRow > 1) {
     sheet.getRange(2, 4, lastRow - 1, 1).getDisplayValues().forEach(function (r) {
-      if (String(r[0]).trim()) hasAny = true;
+      var k = String(r[0]).trim();
+      if (k) { present[canon(k)] = true; hasAny = true; }
     });
   }
-  if (hasAny) return;   // already configured — leave the operator's numbers alone
 
   var seed = [
     ['brand', '0.20',
       'Brand campaigns only match babyshop/lekmer brand queries. That demand already chose us and mostly ' +
       'arrives anyway, so only ~20% of the reported value is assumed to be caused by the ad. Cost is 100% real. ' +
-      'Note the spend is also defensive (competitors bid on our brand terms), so a low factor does NOT mean minimise.'],
+      'Note the spend is also defensive (competitors bid on our brand terms), so a low factor does NOT mean minimise. ' +
+      'Used only as a FALLBACK when the campaign has no impression-share data.'],
     ['private-label', '0.50',
       'Private-label ("pb") campaigns advertise products sold nowhere else — the shopper who wants one has a ' +
-      'single place to buy it, so roughly half the value is assumed to convert without the ad.'],
+      'single place to buy it, so roughly half the value is assumed to convert without the ad. ' +
+      'Used only as a FALLBACK when the campaign has no impression-share data.'],
     ['generic', '1.00',
-      'Open-market prospecting: the click is the demand, so value is taken at face value. Leave at 1.00.'],
+      'Open-market prospecting: the click is the demand, so value is taken at face value. Leave at 1.00. ' +
+      'Generic is never impression-share-adjusted.'],
+    ['brand-floor', '0.10',
+      'RESERVED KEY (not a name pattern). Lower bound of the impression-share-derived brand factor: what a ' +
+      'brand campaign already holding ~100% ABSOLUTE TOP impression share is worth at the margin — it owns the ' +
+      'auction, so extra spend buys almost nothing incremental.'],
+    ['brand-cap', '0.60',
+      'RESERVED KEY. Upper bound of the brand factor: what a brand campaign with no absolute-top share at all ' +
+      'is worth, i.e. one being outbid on its own brand terms, where the spend genuinely buys back a shopper.'],
+    ['private-label-floor', '0.40',
+      'RESERVED KEY. Lower bound of the private-label factor, applied when the campaign already has ~100% ' +
+      'SEARCH impression share on its own products.'],
+    ['private-label-cap', '1.00',
+      'RESERVED KEY. Upper bound of the private-label factor, applied when the campaign is essentially absent ' +
+      'from the auction and every impression won is new.'],
     ['', '',
-      'OVERRIDES: put a campaign-name pattern (not a class) in column D with its own factor in column E to ' +
-      'override that campaign\'s class factor — e.g. "p-shopping-se-pb-product" with 0.65. Matching is ' +
+      'HOW THE FACTOR IS DERIVED: headroom h = 1 − (absolute top IS for brand, search IS for private label); ' +
+      'factor = floor + (cap − floor) × h, clamped to [floor, cap]. No share data for a campaign (blank, or the ' +
+      'Shares tab missing) falls back to the flat class factor above. Generic is never adjusted.'],
+    ['', '',
+      'OVERRIDES: put a campaign-name pattern (not a class and not one of the reserved keys above) in column D ' +
+      'with its own factor in column E to pin that campaign\'s factor — e.g. "p-shopping-se-pb-product" with ' +
+      '0.65. An explicit override beats the share-derived factor, which beats the flat class factor. Matching is ' +
       'case-insensitive substring; when several patterns match a name, the LONGEST one wins. ' +
       'All of these are assumptions: replace them with geo-holdout or conversion-lift measurements when you have them.']
   ];
 
-  var needRows = 1 + seed.length;
+  /* Keyed rows are added only when missing; the trailing comment rows (blank key) are added
+     only on a first-time seed, or re-running would stack duplicate comments forever. */
+  var toAdd = seed.filter(function (row) {
+    return row[0] ? !present[canon(row[0])] : !hasAny;
+  });
+  if (!toAdd.length) return;
+
+  /* First-time seed starts at row 2, filling the D/E/F cells beside the account block.
+     Later top-ups append below everything, so nothing an operator wrote is overwritten. */
+  var startRow = hasAny ? Math.max(sheet.getLastRow(), 1) + 1 : 2;
+  var needRows = startRow + toAdd.length - 1;
   if (sheet.getMaxRows() < needRows) sheet.insertRowsAfter(sheet.getMaxRows(), needRows - sheet.getMaxRows());
-  sheet.getRange(2, 4, seed.length, 3).setValues(seed);
-  Logger.log('Seeded incrementality defaults: brand 0.20, private-label 0.50, generic 1.00.');
+  sheet.getRange(startRow, 4, toAdd.length, 3).setValues(toAdd);
+  Logger.log('Seeded ' + toAdd.length + ' incrementality row(s): ' +
+    toAdd.map(function (r) { return r[0] || '(notes)'; }).join(', ') + '.');
 }
 
 /** Sanity-check the payload from the editor without deploying. */
@@ -506,4 +704,8 @@ function testPayload() {
   Logger.log('columns:    ' + JSON.stringify(parsed.columns));
   Logger.log('config:     ' + JSON.stringify(parsed.config));
   Logger.log('first row:  ' + JSON.stringify(parsed.rows[0]));
+  Logger.log('shares:     ' + (parsed.shares
+    ? parsed.shares.rows.length + ' row(s) for ' + JSON.stringify(parsed.shares.runDates)
+    : 'none — brand and private label fall back to flat class factors'));
+  if (parsed.shares) Logger.log('first share:' + JSON.stringify(parsed.shares.rows[0]));
 }

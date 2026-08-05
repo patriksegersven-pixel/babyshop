@@ -94,6 +94,72 @@ findings. The only things that replace them are a **geo holdout** (hold the camp
 in matched regions and compare total sales) or a **conversion-lift test**. Until then the page
 labels them "assumed" everywhere they touch a number.
 
+### Impression share makes the factor campaign-specific
+
+A flat 0.20 says exactly the same thing about a brand campaign that already sits in the
+absolute top slot for 99% of its brand searches as about one that is being outbid half the
+time. Those are opposite situations:
+
+- The first **owns the auction**. The shopper sees us first whatever we bid next, so marginal
+  spend is close to pure insurance and buys almost nothing incremental.
+- The second has **real defensive headroom**. The impressions it is losing are going to a
+  competitor bidding on our name, and buying them back genuinely changes the outcome.
+
+So wherever the Ads script has collected impression share (the `Shares` tab), the factor is
+**derived from the headroom left in the auction** instead of assumed:
+
+```
+headroom  h = 1 − <share metric>              clamped to [0, 1]
+factor      = floor + (cap − floor) × h       clamped to [floor, cap]
+```
+
+| Class | Metric driving `h` | Why that metric | Floor | Cap |
+|---|---|---|---|---|
+| `brand` | `search_absolute_top_impression_share` | On our own brand terms the question is not whether we appear but whether we appear **first** — a competitor above us is what the spend defends against. | **0.10** | **0.60** |
+| `private-label` | `search_impression_share` | These products are sold nowhere else, so what matters is being **present** in the auction at all, not the exact slot. | **0.40** | **1.00** |
+| `generic` | — | Never share-adjusted. Its factor is 1.00 by definition: the click *is* the demand. | — | — |
+
+Worked examples from the demo data (illustrative share values, real simulation curves):
+
+| Campaign | Metric | Share | `h` | Factor | vs. flat |
+|---|---|---|---|---|---|
+| `p-shopping-se-brand` | abs top | 0.93 | 0.07 | `0.10 + 0.50 × 0.07` = **0.135** | was 0.20 → iGP3-max target moves 860% → **1200%** |
+| `p-shopping-se-pb-product` | search IS | 0.71 | 0.29 | `0.40 + 0.60 × 0.29` = **0.574** | was 0.50 → iGP3-max target moves 450% → **370%** |
+
+A campaign already owning its auction lands on the **floor**; one absent from it lands on the
+**cap**. Note the direction: a *lower* factor pushes the recommended target ROAS **up** (spend
+down), a *higher* factor pushes it **down** (spend up).
+
+**Fallback ladder**, strongest first — each rung applies only when the one above it is absent:
+
+1. an explicit **per-campaign pattern override** in the `Config` tab (a human pinned this
+   number, and no derivation may quietly overrule it);
+2. the **impression-share-derived factor**, for brand / private-label campaigns that have
+   share data;
+3. the **flat class factor** from the `Config` tab;
+4. the **built-in default** (0.20 / 0.50 / 1.00), so a payload with no `incrementality` block
+   at all still works.
+
+Missing share data is a normal state, not an error: `null`, a blank cell **and a literal 0**
+all mean *no data* and fall back to rung 3. Performance Max, Display and video campaigns
+report no impression share at all. Deriving `h = 1 − 0 = 1` from an absent metric would claim
+maximum headroom for a campaign we simply cannot see, which is why 0 is never trusted.
+
+**The `<10%` / `>90%` caveat.** Google does not report these metrics continuously at the
+extremes: anything below 10% arrives as `0.0999`, and everything above 90% collapses into a
+`>0.9` bucket. Values are taken at face value regardless — the dashboard says so in the
+drill-down — but it means a headroom near 0 or near 1 is coarser than the two decimals
+suggest. In practice this hurts least where it matters most: a brand campaign anywhere in the
+`>90%` bucket sits within a few hundredths of the floor either way.
+
+**What impression share does and does not buy you.** It does not measure incrementality. It
+decides *where between the floor and the cap* a campaign sits; the floor and the cap
+themselves are still assumptions, and only a geo holdout or a conversion-lift test replaces
+those. What it does buy is that two campaigns in genuinely different competitive positions
+stop being handed the same number.
+
+**Floors and caps are Config-editable**, under four reserved keys — see below.
+
 ### Editing them without touching code
 
 Everything above lives in the `Config` tab, columns **D/E/F**, next to the existing
@@ -101,27 +167,58 @@ account/multiplier pair in A/B/C:
 
 | Incrementality Class or Name Pattern | Incrementality Factor | Notes |
 |---|---|---|
-| `brand` | `0.20` | class default |
-| `private-label` | `0.50` | class default |
-| `generic` | `1.00` | leave at 1.00 |
-| `p-shopping-se-pb-product` | `0.65` | per-campaign override |
+| `brand` | `0.20` | class default — the **fallback** used when a brand campaign has no share data |
+| `private-label` | `0.50` | class default — same, for private label |
+| `generic` | `1.00` | leave at 1.00; never share-adjusted |
+| `brand-floor` | `0.10` | **reserved key** — factor for a brand campaign at ~100% absolute-top share |
+| `brand-cap` | `0.60` | **reserved key** — factor for a brand campaign with no absolute-top share |
+| `private-label-floor` | `0.40` | **reserved key** — at ~100% search impression share |
+| `private-label-cap` | `1.00` | **reserved key** — at ~0% search impression share |
+| `p-shopping-se-pb-product` | `0.65` | per-campaign override — beats both the derived and the class factor |
 
-`0.2`, `0,2`, `20` and `20%` all parse to 0.20. A row whose key is **not** a class name is a
+`0.2`, `0,2`, `20` and `20%` all parse to 0.20. The three class names and the four reserved
+share keys are matched with punctuation and case stripped, so `Brand Cap` and `brand-cap` are
+the same row. A row whose key is **neither** a class name **nor** a reserved key is a
 **campaign-name pattern override**: matched case-insensitively as a substring of the campaign
 name, and when several patterns match, the **longest one wins**. Rows with a blank key or an
 unreadable factor are ignored, so free-text comment rows in the tab are harmless.
+
+`setupConfigTab()` seeds all seven keyed rows and is **idempotent per key**: re-run it after
+upgrading `webapp.gs` and an existing tab gains only the four bound rows it was missing, with
+every factor you have edited left untouched.
 
 The endpoint serves this as:
 
 ```js
 config.incrementality = {
-  classes:   { brand: 0.2, 'private-label': 0.5, generic: 1.0 },
-  overrides: [ { pattern: 'p-shopping-se-pb-product', factor: 0.65 } ]
+  classes:      { brand: 0.2, 'private-label': 0.5, generic: 1.0 },
+  overrides:    [ { pattern: 'p-shopping-se-pb-product', factor: 0.65 } ],
+  shareWeights: { brand:           { floor: 0.10, cap: 0.60 },
+                  'private-label': { floor: 0.40, cap: 1.00 } }
 }
 ```
 
+and the impression-share snapshot alongside it, or `null` when the tab does not exist yet:
+
+```js
+payload.shares = {
+  columns:  ['Customer Name','Campaign Id','Campaign Name','Search IS','Top IS','Abs Top IS','Currency','Run Date'],
+  rows:     [ ['Babyshop SE','21700388337','p-shopping-se-brand',0.97,0.96,0.93,'SEK','2026-08-03'], ... ],
+  runDates: ['2026-08-03']
+}
+```
+
+Rows are joined to campaigns by `(account, campaign id)`, falling back to `(account, name)`.
+Only the **latest run date** is served (and used), because a factor derived from three-week-old
+impression share would be worse than the flat prior it replaces; `runs=N` widens that when a
+client wants share data aligned with older snapshots. The dashboard flags it in the trust
+panel when the share run date differs from the simulation run date, and when a brand or
+private-label campaign has no share row at all.
+
 If `config.incrementality` is missing entirely — an older deployment, or a `Config` tab that
 was never seeded — the dashboard falls back to the same built-in defaults, so nothing breaks.
+The same is true of `payload.shares`: absent means every campaign keeps its flat class factor,
+which is exactly the behaviour that predates this feature.
 
 This is **orthogonal to `valueToGp2Multiplier`** above and applies strictly after it: the
 multiplier answers *"is this number GP2?"*, incrementality answers *"how much of this GP2 did
@@ -133,23 +230,24 @@ the ad cause?"*. Cost is never scaled by either.
   Google Ads MCC                Google Sheet                Apps Script              GitHub Pages
  ┌────────────────┐          ┌──────────────────┐        ┌──────────────┐          ┌──────────────┐
  │ gp3-simulations│  append  │ Raw   (snapshots)│  read  │ webapp.gs    │  fetch   │ index.html   │
- │ .js            │─────────▶│ Config(optional) │───────▶│ doGet + token│─────────▶│ dashboard    │
- │ scheduled      │  1×/run  │ 90-day history   │        │ → JSON       │   CORS   │ all math     │
- └────────────────┘          └──────────────────┘        └──────────────┘          │ client-side  │
-        │                                                                          └──────────────┘
-        │ AdsApp.search(bidding_strategy_simulation)                                       │
-        │ TARGET_ROAS point lists, ~10 points per strategy                                 │ localStorage
+ │ .js            │─────────▶│ Shares(impr.share)│──────▶│ doGet + token│─────────▶│ dashboard    │
+ │ scheduled      │  1×/run  │ Config(optional) │        │ → JSON       │   CORS   │ all math     │
+ └────────────────┘          │ 90-day history   │        └──────────────┘          │ client-side  │
+        │                    └──────────────────┘                                  └──────────────┘
+        │ AdsApp.search(campaign_simulation)   TARGET_ROAS point lists                     │
+        │ AdsApp.search(campaign)              last-7-days impression share                │ localStorage
         ▼                                                                                  ▼
-   one row per simulated target ROAS, tagged with Run Date                       last good snapshot
+   one row per simulated target ROAS + one row per campaign's share,            last good snapshot
+   both tagged with the same Run Date
 ```
 
 Each stage is replaceable and none of them holds state the next one needs:
 
 | Stage | File | Responsibility |
 |---|---|---|
-| Collect | `ads-script/gp3-simulations.js` | Query simulations in every account, **append** a dated snapshot to the sheet. Never clears, never reads back. |
-| Store | Google Sheet, `Raw` + `Config` tabs | Append-only history, pruned at 90 days. `Config` maps account → `valueToGp2Multiplier` (normally `1.0`) and class/pattern → incrementality factor. |
-| Serve | `apps-script/webapp.gs` | `doGet` checks a token, normalises dates/numbers, returns JSON. |
+| Collect | `ads-script/gp3-simulations.js` | Query simulations **and** last-7-days impression share in every account, **append** a dated snapshot to two tabs. Never clears, never reads back. Both datasets ride back from each child account in the one string `executeInParallel` allows, split by a group separator; if the ~100 KB cap bites, share rows are dropped first because the simulations are the primary payload. |
+| Store | Google Sheet, `Raw` + `Shares` + `Config` tabs | Append-only history on both data tabs, pruned at 90 days. `Config` maps account → `valueToGp2Multiplier` (normally `1.0`), class/pattern → incrementality factor, and the four reserved keys → share-derived floors and caps. |
+| Serve | `apps-script/webapp.gs` | `doGet` checks a token, normalises dates/numbers/shares, returns JSON. A missing `Shares` tab serves `shares: null` rather than failing. |
 | Present | `index.html` | Single file. Fetches the JSON, does **all** economics in the browser, caches the last good payload. |
 
 ## What the dashboard shows
@@ -161,7 +259,10 @@ Each stage is replaceable and none of them holds state the next one needs:
 - **Strategy curves** — GP2, GP3 and (where the factor bites) iGP3 against cost with the
   current and recommended points marked, plus marginal incremental ROAS against target with
   the 1.0 breakeven line and the linearly-interpolated crossing. Brand and private-label
-  campaigns also show the incrementality assumption and its sensitivity line.
+  campaigns also show the incrementality factor and its sensitivity line, plus — where share
+  data exists — all three impression-share metrics, which one drives the factor, the headroom
+  it leaves, the arithmetic, and the floor and cap in play. The summary pill says which it is:
+  `×0.13 (IS-derived)` against `×0.20 (assumed)`.
 - **Portfolio budget** — enter a total budget and get the equal-marginal-return split:
   spend is allocated greedily to the highest **incremental** marginal ROAS available anywhere
   until the budget runs out, so every strategy ends on the same marginal return. A note sizes
@@ -188,7 +289,10 @@ Two numbers deliberately differ and both are shown:
    - `SPREADSHEET_URL` — the sheet that will hold the data.
    - `ACCOUNT_IDS` — child account CIDs (Babyshop SE/NO/ROW/DK/FI, Lekmer SE/NO).
    - `LOOKBACK_PRUNE_DAYS` — history retention, default 90.
-4. **Authorise → Preview → Run.** It creates the `Raw` tab and its header row.
+   - `COLLECT_SHARES` — leave `true` to also collect last-7-days impression share into the
+     `Shares` tab, which is what makes brand and private-label incrementality factors
+     campaign-specific. Set `false` and everything falls back to flat class factors.
+4. **Authorise → Preview → Run.** It creates the `Raw` and `Shares` tabs and their header rows.
 5. Schedule it **Weekly** (matching the 7-day simulation window) or Daily.
 
 Re-running on the same day replaces that day's rows instead of duplicating them, so a
@@ -206,11 +310,15 @@ manual run between scheduled ones is safe.
    D/E/F. Leave the multipliers at `1`: conversion value is already GP2. Change a row only
    for an account that reports revenue instead, entering its gross margin (`30%`, `30` and
    `0.3` all work); the `Default` row covers anything missing. The incrementality factors
-   (`brand` 0.20, `private-label` 0.50, `generic` 1.00) *are* meant to be edited — see
+   (`brand` 0.20, `private-label` 0.50, `generic` 1.00) and the four impression-share bounds
+   (`brand-floor` 0.10, `brand-cap` 0.60, `private-label-floor` 0.40, `private-label-cap`
+   1.00) *are* meant to be edited — see
    [Incrementality](#incrementality-why-brand-and-private-label-are-managed-differently).
-   Re-running `setupConfigTab()` never overwrites values you have already entered. The
+   Re-running `setupConfigTab()` never overwrites values you have already entered and adds
+   only the keyed rows that are missing, so run it again after upgrading this file. The
    endpoint serves these as `config.valueToGp2Multipliers` /
-   `config.defaultValueToGp2Multiplier` / `config.incrementality`.
+   `config.defaultValueToGp2Multiplier` / `config.incrementality` (including
+   `config.incrementality.shareWeights`), plus `payload.shares` from the `Shares` tab.
 4. **Deploy → New deployment → Web app**, *Execute as* **Me**, *Who has access*
    **Anyone with the link**. Copy the `/exec` URL.
 5. Check it: `<exec-url>?token=<token>&runs=1`.
@@ -228,7 +336,10 @@ const DATA_TOKEN    = 'the-same-token';
 ```
 
 Leave them empty and the page runs on `DEMO_DATA` — one real Babyshop SE snapshot, 92
-simulation points across 9 strategies — and labels itself **Demo data** throughout.
+simulation points across 9 strategies — and labels itself **Demo data** throughout. That block
+carries two **illustrative** impression-share rows (the SE brand campaign at 0.93 absolute-top,
+`pb-product` at 0.71 search IS) so the dynamic path is exercised in demo mode; unlike the
+simulation rows, those two are made up.
 
 ### 4. GitHub Pages
 
@@ -271,7 +382,10 @@ reported ROAS — the same discrepancy you see in the Google Ads UI.
 So treat every recommendation as a **directional step move**. Change one target at a time,
 give the strategy a week or two to re-learn, then re-check against a fresh snapshot. The
 dashboard flags stale snapshots (>7 days), short simulation grids, targets sitting outside
-the simulated range, and strategies whose optimum lies beyond the simulated window.
+the simulated range, and strategies whose optimum lies beyond the simulated window. It also
+flags anything that weakens the incrementality factors: no `Shares` tab at all, brand or
+private-label campaigns with no share row, and share data collected on a different run date
+than the simulations being shown.
 
 ## Repository layout
 
