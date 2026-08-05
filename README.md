@@ -57,14 +57,17 @@ iGP3 = iGP2 − ad cost          ← every recommendation on the page is read of
 | Class | Matched by (case-insensitive, in this order) | Default factor |
 |---|---|---|
 | `brand` | name contains `brand` | **0.20** |
+| `generic` | name contains `pb-generic` | **1.00** |
 | `private-label` | name contains `-pb-`, or ends with `-pb` | **0.50** |
 | `generic` | everything else | **1.00** |
 
-**Precedence is explicit**, because names carry more than one marker: `brand` is tested
-first, then the private-label markers, then generic as the fallback. The real strategy
-`p-shopping-se-pb-generic` contains both `-pb-` *and* the word "generic" and classifies as
-**private label** — it is a private-label campaign whose keyword theme happens to be generic.
-`p-shopping-se-brand` classifies as brand despite being a shopping campaign.
+**Precedence is explicit, and incrementality follows the query, not the product.**
+`pb-generic` campaigns sell private-label products but match on *generic* search terms —
+that searcher was not coming to us anyway, so they capture open-market demand and take no
+incrementality discount (`p-shopping-se-pb-generic` → **generic**). `pb-product` campaigns
+match on the private-label products themselves, which are sold nowhere else, so much of
+that value converts organically (→ **private label**, 0.50). `p-shopping-se-brand`
+classifies as brand despite being a shopping campaign.
 
 What changes in the UI:
 

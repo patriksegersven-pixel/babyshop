@@ -563,20 +563,24 @@ var INCREMENTALITY_CLASSES = ['generic', 'private-label', 'brand'];
  *
  * PRECEDENCE IS DELIBERATE AND ORDER-DEPENDENT — a name can carry more than one marker:
  *   1. 'brand'          anywhere in the name  -> brand
- *   2. '-pb-' anywhere, or a trailing '-pb'   -> private-label
- *   3. everything else                        -> generic
+ *   2. 'pb-generic'     anywhere in the name  -> generic
+ *   3. '-pb-' anywhere, or a trailing '-pb'   -> private-label
+ *   4. everything else                        -> generic
  *
- * The real Babyshop strategy `p-shopping-se-pb-generic` contains BOTH '-pb-' AND the
- * word "generic". Because private label is tested before the generic fallback, it
- * classifies as private-label — the conservative (lower-incrementality) reading, and the
- * correct one: it is a private-label campaign whose *keyword theme* is generic.
+ * Incrementality follows the QUERY, not the product. `pb-generic` campaigns sell
+ * private-label products but match on GENERIC search terms — that searcher was not
+ * coming to us anyway, so the ad captures open-market demand and the incrementality
+ * discount does not apply (e.g. `p-shopping-se-pb-generic` -> generic). `pb-product`
+ * campaigns match on the private-label products themselves, which are sold nowhere
+ * else — that buyer largely converts anyway -> private-label.
  * Likewise `p-shopping-se-brand` is brand even though it is a shopping campaign.
  */
 function incrementalityClass(name) {
   var n = String(name == null ? '' : name).toLowerCase();
   if (n.indexOf('brand') >= 0) return 'brand';                          // 1
-  if (n.indexOf('-pb-') >= 0 || /-pb$/.test(n)) return 'private-label';  // 2
-  return 'generic';                                                      // 3
+  if (n.indexOf('pb-generic') >= 0) return 'generic';                    // 2
+  if (n.indexOf('-pb-') >= 0 || /-pb$/.test(n)) return 'private-label';  // 3
+  return 'generic';                                                      // 4
 }
 
 /**

@@ -18,7 +18,9 @@
  *   Cost is 100% real for every campaign; observed conversion value is not equally
  *   CAUSED by the ad. Brand campaigns only match our own brand queries, and private-label
  *   ("pb") campaigns advertise products sold nowhere else - much of their value would
- *   convert anyway. The Config tab therefore also carries an incrementality factor per
+ *   convert anyway. Exception: "pb-generic" campaigns sell private-label products but
+ *   match on GENERIC search terms, so they capture open-market demand and classify as
+ *   generic (incrementality follows the query, not the product). The Config tab therefore also carries an incrementality factor per
  *   class (brand 0.20, private-label 0.50, generic 1.00) plus optional per-campaign
  *   pattern overrides, served as `config.incrementality`. The dashboard multiplies GP2 by
  *   that factor and reads every recommendation off iGP3 = factor x GP2 - cost. The factors
