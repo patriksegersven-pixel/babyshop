@@ -33,8 +33,9 @@
 /* ========================== CONFIG ========================== */
 
 var CONFIG = {
-  /** Full URL of the target spreadsheet. */
-  SPREADSHEET_URL: '',
+  /** Full URL of the target spreadsheet. The sheet itself stays private;
+      this URL only identifies it — access is governed by Drive sharing. */
+  SPREADSHEET_URL: 'https://docs.google.com/spreadsheets/d/1x4GJxXSPzmJ-53hpal-0KN6_tLzhFjvJMzH2GRy0KD8/edit',
 
   /** Child account CIDs to process, with or without dashes. */
   ACCOUNT_IDS: [
