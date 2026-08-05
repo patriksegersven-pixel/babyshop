@@ -55,11 +55,12 @@ var CONFIG = {
   LOOKBACK_PRUNE_DAYS: 90,
 
   /**
-   * Also collect campaign-level Target ROAS simulations. Babyshop bids through
-   * portfolio strategies, so this is off by default; turn it on to see
-   * standalone campaigns that are not in a portfolio.
+   * Collect campaign-level Target ROAS simulations. Must stay ON for Babyshop:
+   * validated against the live API (Aug 2026), Google exposes these accounts'
+   * simulations on campaign_simulation — bidding_strategy_simulation returns
+   * nothing even though bidding runs through portfolio strategies.
    */
-  INCLUDE_CAMPAIGNS: false,
+  INCLUDE_CAMPAIGNS: true,
 
   /** Log every simulation point. Noisy; useful when debugging a single account. */
   VERBOSE: false
