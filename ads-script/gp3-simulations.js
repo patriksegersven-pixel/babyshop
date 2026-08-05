@@ -469,8 +469,10 @@ function deleteRowsWhere(sheet, predicate, reason) {
 
 /* ========================== DATES ========================== */
 
+/* AdsApp.currentAccount() resolves to the manager account when called from MCC
+   context (AdsManagerApp has no currentAccount() method — verified in prod). */
 function todayInManagerTimezone() {
-  return Utilities.formatDate(new Date(), AdsManagerApp.currentAccount().getTimeZone(), 'yyyy-MM-dd');
+  return Utilities.formatDate(new Date(), AdsApp.currentAccount().getTimeZone(), 'yyyy-MM-dd');
 }
 
 /** Sheet cells may hold a Date object or a string; compare as yyyy-MM-dd.
