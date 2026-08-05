@@ -58,9 +58,17 @@ var CONFIG = {
    * Collect campaign-level Target ROAS simulations. Must stay ON for Babyshop:
    * validated against the live API (Aug 2026), Google exposes these accounts'
    * simulations on campaign_simulation — bidding_strategy_simulation returns
-   * nothing even though bidding runs through portfolio strategies.
+   * nothing for SE / Lekmer NO / Lekmer DK, and only one strategy elsewhere.
    */
   INCLUDE_CAMPAIGNS: true,
+
+  /**
+   * Also collect portfolio-strategy-level simulations. OFF by default: the
+   * campaigns inside those strategies already show up in campaign_simulation,
+   * so including both levels double-counts the same auction traffic in any
+   * cross-strategy total. Turn on only for a one-off comparison.
+   */
+  INCLUDE_PORTFOLIO: false,
 
   /** Log every simulation point. Noisy; useful when debugging a single account. */
   VERBOSE: false
@@ -97,8 +105,8 @@ function main() {
     .filter(function (id) { return id.length > 0; });
   if (!accountIds.length) throw new Error('CONFIG.ACCOUNT_IDS is empty.');
 
-  var payload = [runDate, CONFIG.INCLUDE_CAMPAIGNS ? '1' : '0', CONFIG.VERBOSE ? '1' : '0']
-    .join(ARG_SEPARATOR);
+  var payload = [runDate, CONFIG.INCLUDE_CAMPAIGNS ? '1' : '0', CONFIG.VERBOSE ? '1' : '0',
+    CONFIG.INCLUDE_PORTFOLIO ? '1' : '0'].join(ARG_SEPARATOR);
 
   var accounts = AdsManagerApp.accounts().withIds(accountIds).get();
   var found = 0;
@@ -119,10 +127,11 @@ function collectSimulations(packedArgs) {
   var runDate = parts[0];
   var includeCampaigns = parts[1] === '1';
   var verbose = parts[2] === '1';
+  var includePortfolio = parts[3] === '1';
 
   var rows = [];
   try {
-    rows = rows.concat(portfolioSimulations(runDate, verbose));
+    if (includePortfolio) rows = rows.concat(portfolioSimulations(runDate, verbose));
     if (includeCampaigns) rows = rows.concat(campaignSimulations(runDate, verbose));
   } catch (e) {
     Logger.log('ERROR in ' + AdsApp.currentAccount().getName() + ': ' + e);
@@ -161,11 +170,9 @@ function portfolioSimulations(runDate, verbose) {
     var points = sim.targetRoasPointList && sim.targetRoasPointList.points;
     if (!points || !points.length) continue;
 
-    var currentTarget = null;
-    if (strat.targetRoas && strat.targetRoas.targetRoas != null) {
-      currentTarget = strat.targetRoas.targetRoas;
-    } else if (strat.maximizeConversionValue && strat.maximizeConversionValue.targetRoas != null) {
-      currentTarget = strat.maximizeConversionValue.targetRoas;
+    var currentTarget = roasOrNull(strat.targetRoas && strat.targetRoas.targetRoas);
+    if (currentTarget == null) {
+      currentTarget = roasOrNull(strat.maximizeConversionValue && strat.maximizeConversionValue.targetRoas);
     }
 
     for (var i = 0; i < points.length; i++) {
@@ -183,10 +190,11 @@ function portfolioSimulations(runDate, verbose) {
   return out;
 }
 
-/** Target ROAS simulations for standalone campaigns (optional). */
+/** Target ROAS simulations for campaigns (the main source for these accounts). */
 function campaignSimulations(runDate, verbose) {
   var customer = accountInfo();
   var out = [];
+  var strategyTargets = portfolioTargetMap();
 
   var query =
     'SELECT ' +
@@ -196,6 +204,7 @@ function campaignSimulations(runDate, verbose) {
     '  campaign_simulation.target_roas_point_list.points, ' +
     '  campaign.id, ' +
     '  campaign.name, ' +
+    '  campaign.bidding_strategy, ' +
     '  campaign.bidding_strategy_type, ' +
     '  campaign.target_roas.target_roas, ' +
     '  campaign.maximize_conversion_value.target_roas ' +
@@ -210,11 +219,18 @@ function campaignSimulations(runDate, verbose) {
     var points = sim.targetRoasPointList && sim.targetRoasPointList.points;
     if (!points || !points.length) continue;
 
-    var currentTarget = null;
-    if (camp.targetRoas && camp.targetRoas.targetRoas != null) {
-      currentTarget = camp.targetRoas.targetRoas;
-    } else if (camp.maximizeConversionValue && camp.maximizeConversionValue.targetRoas != null) {
-      currentTarget = camp.maximizeConversionValue.targetRoas;
+    /* Current target lives in one of three places, and unset values arrive as
+       0 rather than null (validated live, Aug 2026): the campaign's own tROAS,
+       the campaign's Maximize Conversion Value target, or — for campaigns in a
+       portfolio strategy — on the bidding_strategy resource. A target of 0 is
+       never legitimate, so 0 always means "look at the next source". */
+    var currentTarget = roasOrNull(camp.targetRoas && camp.targetRoas.targetRoas);
+    if (currentTarget == null) {
+      currentTarget = roasOrNull(camp.maximizeConversionValue && camp.maximizeConversionValue.targetRoas);
+    }
+    if (currentTarget == null && camp.biddingStrategy) {
+      var stratId = String(camp.biddingStrategy).split('/').pop();
+      currentTarget = roasOrNull(strategyTargets[stratId]);
     }
 
     for (var i = 0; i < points.length; i++) {
@@ -230,6 +246,37 @@ function campaignSimulations(runDate, verbose) {
     if (verbose) Logger.log('  campaign ' + camp.name + ': ' + points.length + ' point(s)');
   }
   return out;
+}
+
+/**
+ * Map of portfolio bidding strategy id -> current Target ROAS, used to resolve
+ * the real target for campaigns whose bidding runs through a portfolio.
+ */
+function portfolioTargetMap() {
+  var map = {};
+  var query =
+    'SELECT bidding_strategy.id, ' +
+    '  bidding_strategy.target_roas.target_roas, ' +
+    '  bidding_strategy.maximize_conversion_value.target_roas ' +
+    'FROM bidding_strategy';
+  var it = AdsApp.search(query);
+  while (it.hasNext()) {
+    var row = it.next();
+    var strat = row.biddingStrategy || {};
+    var target = roasOrNull(strat.targetRoas && strat.targetRoas.targetRoas);
+    if (target == null) {
+      target = roasOrNull(strat.maximizeConversionValue && strat.maximizeConversionValue.targetRoas);
+    }
+    if (strat.id != null && target != null) map[String(strat.id)] = target;
+  }
+  return map;
+}
+
+/** A ROAS target of null, '', or 0 all mean "not set here". */
+function roasOrNull(v) {
+  if (v == null || v === '') return null;
+  var n = Number(v);
+  return isNaN(n) || n === 0 ? null : n;
 }
 
 /* ========================== ROW BUILDING ========================== */
