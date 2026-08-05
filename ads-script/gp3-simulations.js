@@ -38,14 +38,14 @@ var CONFIG = {
 
   /** Child account CIDs to process, with or without dashes. */
   ACCOUNT_IDS: [
-    '485-148-5396',
-    '862-394-5183',
-    '830-823-2278',
-    '778-011-4635',
-    '616-139-9704',
-    '554-148-7401',
-    '275-639-7225',
-    '205-429-4342'
+    '485-148-5396',   // Babyshop SE  (SEK)
+    '862-394-5183',   // Babyshop NO  (NOK)
+    '830-823-2278',   // Lekmer NO    (NOK)
+    '778-011-4635',   // Lekmer SE    (SEK)
+    '616-139-9704',   // Babyshop FI  (EUR)
+    '554-148-7401',   // Babyshop ROW (SEK)
+    '275-639-7225',   // Lekmer DK    (DKK)
+    '205-429-4342'    // Babyshop DK  (SEK)
   ],
 
   /** Tab that receives the appended snapshots. Created automatically. */
