@@ -1,0 +1,12 @@
+# Never commit live simulation data — see the security note in README.md.
+# The repo holds code plus the single demo snapshot embedded in index.html.
+*.csv
+*.tsv
+*.xlsx
+*.xls
+data/
+snapshots/
+
+# Local scratch
+.DS_Store
+node_modules/
