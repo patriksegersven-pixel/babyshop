@@ -5,13 +5,32 @@ recommendation per portfolio bidding strategy: where to set each target, what it
 and how to split a fixed budget across strategies.
 
 ```
-GP2 = conversion value reported in Google Ads   (× gross margin on the "Profit" basis)
+GP2 = conversion value reported in Google Ads   (already gross profit — see below)
 GP3 = GP2 − ad cost
 ```
 
-The whole point is the **marginal** view. A strategy can keep buying revenue long after it
-has stopped buying profit. GP3 peaks exactly where the next krona of spend returns less
-than a krona of GP2 — where **marginal ROAS = ΔGP2 / ΔCost** crosses 1.0.
+### Why no gross margin is applied
+
+The **primary conversion action** in these Google Ads accounts sends **cart-level gross
+profit** as its conversion value. Every bid strategy therefore already bids on profit, and
+`Conversions Value` in a bid simulation **is GP2**. The dashboard takes it at face value and
+subtracts only ad cost. Multiplying it by a gross margin would deduct cost of goods a second
+time, which is why the old "Revenue / Profit basis" toggle is gone.
+
+Revenue does exist in the accounts, but only as a **separate secondary conversion action**.
+Bid simulations report a single conversion-value figure — the one the strategy optimises —
+so revenue is simply not present in this data and cannot be derived from it.
+
+There is one escape hatch, normally unused: an optional per-account
+**`valueToGp2Multiplier`** (default `1.0`) served in the payload `config`. Set it only for an
+account whose conversion value is *revenue* rather than GP2 — for example one that has not
+been migrated yet — using that account's gross margin. When any account carries a value
+other than `1.0`, the dashboard shows a small `GP2 = value × 0.30` badge on the affected
+rows; at `1.0` there is no UI for it at all.
+
+The whole point is the **marginal** view. A strategy can keep buying gross profit long after
+it has stopped adding *net* profit. GP3 peaks exactly where the next krona of spend returns
+less than a krona of GP2 — where **marginal ROAS = ΔGP2 / ΔCost** crosses 1.0.
 
 ## Architecture
 
@@ -19,7 +38,7 @@ than a krona of GP2 — where **marginal ROAS = ΔGP2 / ΔCost** crosses 1.0.
   Google Ads MCC                Google Sheet                Apps Script              GitHub Pages
  ┌────────────────┐          ┌──────────────────┐        ┌──────────────┐          ┌──────────────┐
  │ gp3-simulations│  append  │ Raw   (snapshots)│  read  │ webapp.gs    │  fetch   │ index.html   │
- │ .js            │─────────▶│ Config(margins)  │───────▶│ doGet + token│─────────▶│ dashboard    │
+ │ .js            │─────────▶│ Config(optional) │───────▶│ doGet + token│─────────▶│ dashboard    │
  │ scheduled      │  1×/run  │ 90-day history   │        │ → JSON       │   CORS   │ all math     │
  └────────────────┘          └──────────────────┘        └──────────────┘          │ client-side  │
         │                                                                          └──────────────┘
@@ -34,7 +53,7 @@ Each stage is replaceable and none of them holds state the next one needs:
 | Stage | File | Responsibility |
 |---|---|---|
 | Collect | `ads-script/gp3-simulations.js` | Query simulations in every account, **append** a dated snapshot to the sheet. Never clears, never reads back. |
-| Store | Google Sheet, `Raw` + `Config` tabs | Append-only history, pruned at 90 days. `Config` maps account → gross margin. |
+| Store | Google Sheet, `Raw` + `Config` tabs | Append-only history, pruned at 90 days. `Config` optionally maps account → `valueToGp2Multiplier`, normally `1.0`. |
 | Serve | `apps-script/webapp.gs` | `doGet` checks a token, normalises dates/numbers, returns JSON. |
 | Present | `index.html` | Single file. Fetches the JSON, does **all** economics in the browser, caches the last good payload. |
 
@@ -85,8 +104,11 @@ manual run between scheduled ones is safe.
    node -e "console.log(require('crypto').randomBytes(24).toString('hex'))"
    ```
 3. Run `setupConfigTab()` once — creates `Config` and pre-fills the accounts found in
-   `Raw`. Edit the gross margin per account (`30%`, `30` and `0.3` all work); the
-   `Default` row covers anything missing.
+   `Raw` with a `Value to GP2 Multiplier` of `1`. Leave them at `1`: conversion value is
+   already GP2. Change a row only for an account that reports revenue instead, entering
+   its gross margin (`30%`, `30` and `0.3` all work); the `Default` row covers anything
+   missing. The endpoint serves these as
+   `config.valueToGp2Multipliers` / `config.defaultValueToGp2Multiplier`.
 4. **Deploy → New deployment → Web app**, *Execute as* **Me**, *Who has access*
    **Anyone with the link**. Copy the `/exec` URL.
 5. Check it: `<exec-url>?token=<token>&runs=1`.

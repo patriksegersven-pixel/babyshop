@@ -3,8 +3,15 @@
  * Read-only JSON endpoint over the simulation spreadsheet (Google Apps Script)
  * ---------------------------------------------------------------------------
  * Serves the "Raw" tab (written by ads-script/gp3-simulations.js) plus the
- * "Config" tab (gross margin per account) as a single JSON payload that the
- * static dashboard fetches on load.
+ * "Config" tab (optional conversion-value -> GP2 multiplier per account) as a
+ * single JSON payload that the static dashboard fetches on load.
+ *
+ * DATA MODEL
+ *   The primary conversion action in these accounts sends cart-level GROSS PROFIT
+ *   as its value, so "Conversions Value" in a bid simulation is already GP2 and the
+ *   dashboard computes GP3 = GP2 - Cost directly. Revenue lives in a separate
+ *   secondary conversion action that bid simulations do not report. No gross margin
+ *   is applied anywhere; doing so would deduct cost of goods twice.
  *
  * DEPLOY
  *   1. Open the spreadsheet → Extensions → Apps Script.
@@ -12,7 +19,8 @@
  *   3. Set SCRIPT_TOKEN below to a long random string. Generate one with:
  *        node -e "console.log(require('crypto').randomBytes(24).toString('hex'))"
  *   4. Run setupConfigTab() once from the editor to create the Config tab and
- *      grant the authorisation prompts.
+ *      grant the authorisation prompts. The defaults (multiplier 1.0) are correct
+ *      unless an account reports revenue instead of GP2.
  *   5. Deploy → New deployment → type "Web app".
  *        Description:   gp3-dashboard-api
  *        Execute as:    Me            (so viewers need no access to the sheet)
@@ -46,11 +54,15 @@ var SCRIPT_TOKEN = 'CHANGE-ME';
 /** Tab holding the appended simulation snapshots. */
 var RAW_SHEET = 'Raw';
 
-/** Tab mapping account name → gross margin. */
+/** Tab mapping account name → optional conversion-value to GP2 multiplier. */
 var CONFIG_SHEET = 'Config';
 
-/** Gross margin used for accounts with no Config row. */
-var DEFAULT_MARGIN = 0.30;
+/**
+ * Multiplier used for accounts with no Config row. Keep at 1.0: conversion value is
+ * already GP2. Only override per account (in the Config tab) for an account whose
+ * conversion value is revenue rather than GP2 — then its gross margin is the multiplier.
+ */
+var DEFAULT_VALUE_TO_GP2_MULTIPLIER = 1.0;
 
 /** Hard cap on returned rows, newest run dates first. */
 var MAX_ROWS = 20000;
@@ -173,9 +185,15 @@ function readRaw(ss, params) {
   return { columns: columns, rows: body, runDates: runDates, truncated: truncated };
 }
 
-/** Read the Config tab into { margins: {account: fraction}, defaultMargin }. */
+/**
+ * Read the Config tab into
+ *   { valueToGp2Multipliers: {account: number}, defaultValueToGp2Multiplier: number }
+ * Both keys are consumed under exactly these names by index.html. An empty or missing
+ * Config tab yields the default 1.0, which is the correct setting for every account
+ * that sends gross profit as its conversion value.
+ */
 function readConfig(ss) {
-  var out = { margins: {}, defaultMargin: DEFAULT_MARGIN };
+  var out = { valueToGp2Multipliers: {}, defaultValueToGp2Multiplier: DEFAULT_VALUE_TO_GP2_MULTIPLIER };
   var sheet = ss.getSheetByName(CONFIG_SHEET);
   if (!sheet || sheet.getLastRow() < 2) return out;
 
@@ -186,10 +204,10 @@ function readConfig(ss) {
     var name = String(values[i][0]).trim();
     var raw = values[i][1];
     if (!name) continue;
-    var margin = toMargin(raw);
-    if (margin === null) continue;
-    if (name.toLowerCase() === 'default' || name === '*') out.defaultMargin = margin;
-    else out.margins[name] = margin;
+    var mult = toMultiplier(raw);
+    if (mult === null) continue;
+    if (name.toLowerCase() === 'default' || name === '*') out.defaultValueToGp2Multiplier = mult;
+    else out.valueToGp2Multipliers[name] = mult;
   }
   return out;
 }
@@ -235,13 +253,17 @@ function toNumber(v) {
   return isPercent ? n / 100 : n;
 }
 
-/** "30", "30%", "0.3" and "0,3" all become 0.30. Returns null when unparseable. */
-function toMargin(v) {
+/**
+ * Parse a conversion-value → GP2 multiplier. "1", "1.0" and "100%" all become 1.0;
+ * "30", "30%", "0.3" and "0,3" all become 0.30 (an account still reporting revenue).
+ * Returns null when unparseable, so the default applies.
+ */
+function toMultiplier(v) {
   var s = String(v == null ? '' : v).trim();
   if (!s) return null;
   var n = toNumber(s);
   if (!isFinite(n) || n <= 0) return null;
-  if (n > 1) n = n / 100;          // "30" meant 30 per cent
+  if (n > 1) n = n / 100;          // "30" meant 30 per cent, "100" meant 1.0
   return n > 1 ? null : n;
 }
 
@@ -271,7 +293,9 @@ function pad(n) { return ('0' + n).slice(-2); }
 
 /**
  * Run once from the Apps Script editor. Creates the Config tab (if missing) and
- * pre-fills it with the accounts already present in the Raw tab.
+ * pre-fills it with the accounts already present in the Raw tab, each at multiplier 1.
+ * The tab is an escape hatch, not a required step: it exists only so an account whose
+ * conversion value is revenue rather than GP2 can be converted with its gross margin.
  */
 function setupConfigTab() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -280,11 +304,11 @@ function setupConfigTab() {
 
   if (sheet.getLastRow() === 0) {
     sheet.getRange(1, 1, 1, 3)
-      .setValues([['Account', 'Gross Margin %', 'Notes']])
+      .setValues([['Account', 'Value to GP2 Multiplier', 'Notes']])
       .setFontWeight('bold');
     sheet.setFrozenRows(1);
     sheet.getRange(2, 1, 1, 3).setValues([
-      ['Default', '30%', 'Applied to any account without its own row below']
+      ['Default', '1', 'Conversion value is already GP2 — leave at 1 unless an account reports revenue']
     ]);
   }
 
@@ -303,7 +327,7 @@ function setupConfigTab() {
       var seen = {}, toAdd = [];
       raw.getRange(2, idx + 1, raw.getLastRow() - 1, 1).getDisplayValues().forEach(function (r) {
         var name = String(r[0]).trim();
-        if (name && !seen[name] && !known[name]) { seen[name] = true; toAdd.push([name, '30%', '']); }
+        if (name && !seen[name] && !known[name]) { seen[name] = true; toAdd.push([name, '1', '']); }
       });
       if (toAdd.length) {
         sheet.getRange(sheet.getLastRow() + 1, 1, toAdd.length, 3).setValues(toAdd);
@@ -311,7 +335,9 @@ function setupConfigTab() {
       }
     }
   }
-  Logger.log('Config tab ready. Edit the margins, then deploy the web app.');
+  Logger.log('Config tab ready. Leave every multiplier at 1 unless an account reports ' +
+    'revenue instead of GP2 as its conversion value; then set that account\'s gross margin. ' +
+    'Deploy the web app afterwards.');
 }
 
 /** Sanity-check the payload from the editor without deploying. */

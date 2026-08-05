@@ -44,11 +44,6 @@ select:hover,.btn:hover{border-color:var(--accent);}
 select:focus,input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft);}
 .btn-primary{background:var(--ink);color:#fff;border-color:var(--ink);font-weight:500;}
 .btn-primary:hover{background:#000;border-color:#000;}
-.seg{display:inline-flex;border:1px solid var(--line);border-radius:9px;overflow:hidden;background:var(--panel);}
-.seg button{font-family:inherit;font-size:13px;border:none;background:transparent;color:var(--muted);
-  padding:8px 13px;cursor:pointer;transition:.15s;}
-.seg button.on{background:var(--ink);color:#fff;font-weight:500;}
-.seg button:not(.on):hover{background:var(--panel-2);color:var(--ink);}
 
 /* ---------- status strip ---------- */
 .status{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:0 0 18px;font-size:12.5px;color:var(--muted);}
@@ -115,6 +110,8 @@ tr.total-row td{font-weight:700;border-top:2px solid var(--ink);border-bottom:no
 .pill.lower{color:#1c5a86;background:#e6f0f8;}
 .pill.optimum{color:var(--pos);background:rgba(26,127,82,.10);}
 .pill.unknown{color:var(--muted);background:rgba(109,121,134,.10);}
+/* only rendered for accounts with a non-1.0 valueToGp2Multiplier */
+.pill.mult{color:var(--marg);background:rgba(180,118,43,.10);font-weight:500;}
 .num.pos{color:var(--pos);} .num.neg{color:var(--neg);}
 
 /* ---------- charts ---------- */
@@ -182,10 +179,6 @@ body.locked #gate{display:flex;}
     <div class="controls">
       <div class="ctl"><span class="ctl-lbl">Account</span><select id="accountSel"></select></div>
       <div class="ctl"><span class="ctl-lbl">Run</span><select id="runSel"></select></div>
-      <div class="seg" id="basisSeg">
-        <button data-basis="revenue" class="on">Revenue</button>
-        <button data-basis="profit">Profit</button>
-      </div>
       <button class="btn" id="refreshBtn" title="Re-fetch from the Apps Script endpoint">Refresh</button>
     </div>
   </header>
@@ -232,7 +225,8 @@ body.locked #gate{display:flex;}
     <div class="card">
       <h3>Profit curve — GP2 and GP3 against cost</h3>
       <p class="hint">Each dot is one simulated target ROAS. GP3 peaks where the GP2 curve's slope falls to 1.0 —
-        past that point Google can still buy more revenue, but not more profit.</p>
+        past that point Google can still buy more GP2, but each extra krona of spend buys less than a krona of it,
+        so GP3 falls.</p>
       <div class="chart-box tall"><canvas id="chartCurve"></canvas></div>
       <div class="legend">
         <span><i class="sw" style="background:var(--gp2)"></i>GP2</span>
@@ -361,11 +355,17 @@ const STALE_DAYS = 7;
 
    Definitions
      Cost        = Cost Micros / 1e6          (account currency)
-     GP2         = Conversions Value x margin (margin = 1.00 on the "revenue" basis)
+     GP2         = Conversions Value                       <- already gross profit
      GP3         = GP2 - Cost
      marginal ROAS between two adjacent simulation points = dGP2 / dCost
      The profit-maximising target is where marginal ROAS crosses 1.0: the last
      krona of spend must return at least one krona of GP2.
+
+   Why no margin is applied: in these Google Ads accounts the PRIMARY conversion
+   action already sends cart-level gross profit as its value, so "Conversions
+   Value" in a bid simulation IS GP2. Revenue exists only as a separate secondary
+   conversion action, which bid simulations do not report at all. Multiplying by a
+   gross margin here would subtract cost of goods a second time.
    ========================================================= */
 
 /* ---------- generic helpers ---------- */
@@ -603,22 +603,29 @@ function breakevenTarget(segs) {
 
 /**
  * Build the full analysis object for one bidding strategy from its raw simulation rows.
- * `margin` is a fraction (1 = revenue basis, 0.30 = 30% gross margin).
+ *
+ * `valueToGp2Multiplier` is an ESCAPE HATCH, normally 1.0 and normally absent from the
+ * config. It exists only for accounts whose conversion value is revenue rather than GP2
+ * (e.g. a newly onboarded account still bidding on revenue); set it to that account's
+ * gross margin to convert. For every account that sends cart-level profit as its primary
+ * conversion value — which is all of Babyshop's — it must stay 1.0.
  */
-function buildStrategy(rows, margin) {
+function buildStrategy(rows, valueToGp2Multiplier) {
+  var mult = valueToGp2Multiplier == null ? 1 : valueToGp2Multiplier;
   var head = rows[0];
   var points = rows.map(function (r) {
     var cost = r.costMicros / 1e6;
-    var gp2 = r.convValue * margin;
+    var gp2 = r.convValue * mult;
     return {
       target: r.target,
       cost: cost,
       gp2: gp2,
       gp3: gp2 - cost,
-      revenue: r.convValue,
       conversions: r.conversions,
       clicks: r.clicks,
       impressions: r.impressions,
+      // ROAS exactly as Google measures it: reported conversion value over cost,
+      // i.e. the same scale the target ROAS is set on — never multiplier-adjusted.
       roasActual: cost > 0 ? r.convValue / cost : 0
     };
   }).sort(function (a, b) { return a.target - b.target; });
@@ -631,7 +638,7 @@ function buildStrategy(rows, margin) {
   var be = breakevenTarget(segs);
 
   // current position: interpolate the curve at the currently configured target
-  var cur = interpAt(points, 'target', head.currentTarget, ['cost', 'gp2', 'gp3', 'revenue']);
+  var cur = interpAt(points, 'target', head.currentTarget, ['cost', 'gp2', 'gp3']);
   var curInRange = head.currentTarget !== null &&
     head.currentTarget >= points[0].target - 1e-9 &&
     head.currentTarget <= points[points.length - 1].target + 1e-9;
@@ -675,6 +682,7 @@ function buildStrategy(rows, margin) {
     runDate: head.runDate,
     currentTarget: head.currentTarget,
     currentInRange: curInRange,
+    valueToGp2Multiplier: mult,
     points: points,
     byCost: byCost,
     efficient: eff,
@@ -692,8 +700,13 @@ function buildStrategy(rows, margin) {
   };
 }
 
-/** Group normalised rows into per-strategy analyses. */
-function buildStrategies(rows, margins, defaultMargin, basis) {
+/**
+ * Group normalised rows into per-strategy analyses.
+ * `multipliers` maps account name -> valueToGp2Multiplier; `defaultMultiplier` covers the
+ * rest. Both are optional and both default to 1.0 — see buildStrategy() for when the
+ * escape hatch is legitimate.
+ */
+function buildStrategies(rows, multipliers, defaultMultiplier) {
   var groups = {};
   rows.forEach(function (r) {
     // JSON key: strategy names repeat across accounts, and no plain-text
@@ -705,10 +718,9 @@ function buildStrategies(rows, margins, defaultMargin, basis) {
   Object.keys(groups).forEach(function (k) {
     var g = groups[k];
     if (!g.length) return;
-    var margin = basis === 'profit'
-      ? (margins && margins[g[0].account] != null ? margins[g[0].account] : defaultMargin)
-      : 1;
-    out.push(buildStrategy(g, margin));
+    var def = defaultMultiplier == null ? 1 : defaultMultiplier;
+    var mult = multipliers && multipliers[g[0].account] != null ? multipliers[g[0].account] : def;
+    out.push(buildStrategy(g, mult));
   });
   return out.sort(function (a, b) { return (b.current ? b.current.cost : 0) - (a.current ? a.current.cost : 0); });
 }
@@ -797,7 +809,8 @@ function fmtPct1(v) { return v === null || v === undefined ? '—' : (v * 100).t
 const DEMO_DATA = {
   generatedAt: "2026-08-03T06:15:00Z",
   source: "demo",
-  config: { defaultMargin: 0.30, margins: { "Babyshop SE": 0.30 } },
+  // Conversion value in these accounts is already GP2, so no conversion is needed.
+  config: { defaultValueToGp2Multiplier: 1, valueToGp2Multipliers: {} },
   columns: ["Customer Name","Bidding Strategy Name","Current Target Roas","Bidding Strategy Id","Start Date","End Date","TARGET ROAS","Conversions","Conversions Value","Clicks","Cost Micros","Impressions","Top Slot Impressions","Current Campaign Strategy","Currency","Run Date"],
   rows: [
   ["Babyshop SE","p-shopping-se-pb-generic",2.5,"21139965046","2026-07-27","2026-08-02",1.5,3239.3,546177.4,51058,392645636289,2786868,0,"TARGET_ROAS","SEK","2026-08-03"],
@@ -905,7 +918,6 @@ const state = {
   error: null,
   account: null,
   runDate: null,
-  basis: 'revenue',   // 'revenue' | 'profit'
   strategyKey: null,
   mixedCurrency: false,
   budget: null,
@@ -919,7 +931,7 @@ function loadPrefs(){
 function savePrefs(){
   try {
     localStorage.setItem(PREFS_KEY, JSON.stringify({
-      account: state.account, basis: state.basis, strategyKey: state.strategyKey
+      account: state.account, strategyKey: state.strategyKey
     }));
   } catch(e){ /* private mode */ }
 }
@@ -993,10 +1005,28 @@ function scopedRows(){
     (state.account === '__all' || r.account === state.account) && r.runDate === state.runDate);
 }
 
-function margins(){
+/* Optional conversion-value → GP2 multipliers from the endpoint payload.
+   Payload shape (both keys optional, both default to 1.0):
+     config: { defaultValueToGp2Multiplier: 1, valueToGp2Multipliers: { "Some Account": 0.30 } }
+   Only for accounts whose conversion value is revenue rather than GP2. */
+function gp2Multipliers(){
   const cfg = (state.payload && state.payload.config) || {};
-  return { map: cfg.margins || {}, def: cfg.defaultMargin != null ? cfg.defaultMargin : 0.30 };
+  return {
+    map: cfg.valueToGp2Multipliers || {},
+    def: cfg.defaultValueToGp2Multiplier != null ? cfg.defaultValueToGp2Multiplier : 1
+  };
 }
+
+/** Accounts in the current selection whose multiplier is not 1.0 — drives the badges. */
+function adjustedAccounts(){
+  const seen = {};
+  state.strategies.forEach(s => {
+    if (Math.abs(s.valueToGp2Multiplier - 1) > 1e-9) seen[s.account] = s.valueToGp2Multiplier;
+  });
+  return seen;
+}
+
+function multiplierLabel(m){ return 'GP2 = value × ' + m.toFixed(2); }
 
 function rebuild(resetSelections){
   const accs = accounts();
@@ -1004,14 +1034,13 @@ function rebuild(resetSelections){
     const prefs = loadPrefs();
     state.account = (prefs.account && (accs.includes(prefs.account) || prefs.account === '__all'))
       ? prefs.account : (accs.length > 1 ? '__all' : accs[0]);
-    if (prefs.basis === 'profit' || prefs.basis === 'revenue') state.basis = prefs.basis;
   }
   const inAcct = state.rows.filter(r => state.account === '__all' || r.account === state.account);
   const runs = runDates(inAcct);
   if (!runs.includes(state.runDate)) state.runDate = runs[runs.length - 1];
 
-  const m = margins();
-  state.strategies = buildStrategies(scopedRows(), m.map, m.def, state.basis);
+  const m = gp2Multipliers();
+  state.strategies = buildStrategies(scopedRows(), m.map, m.def);
   state.strategies.forEach(s => s.key = s.account + ' · ' + s.name);
   state.mixedCurrency = new Set(state.strategies.map(s => s.currency)).size > 1;
 
@@ -1094,9 +1123,6 @@ function renderSelectors(){
   stratSel.innerHTML = state.strategies.map(s =>
     `<option value="${esc(s.key)}">${esc(state.account === '__all' ? s.key : s.name)}</option>`).join('');
   stratSel.value = state.strategyKey;
-
-  document.querySelectorAll('#basisSeg button').forEach(b =>
-    b.classList.toggle('on', b.dataset.basis === state.basis));
 }
 
 function renderStatus(){
@@ -1124,6 +1150,10 @@ function renderStatus(){
   if (windows.length) bits.push('<span class="sep">|</span><span>Simulation window ' +
     windows.map(w => '<b>' + w + '</b>').join(', ') + '</span>');
   bits.push('<span class="sep">|</span><span>' + state.strategies.length + ' strategies · ' + scoped.length + ' points</span>');
+  // surfaced only when some account carries a non-1.0 valueToGp2Multiplier
+  const adj = adjustedAccounts();
+  Object.keys(adj).forEach(a => bits.push('<span class="badge warn">' + esc(a) + ': ' +
+    esc(multiplierLabel(adj[a])) + '</span>'));
   if (state.fetchedAt) bits.push('<span class="sep">|</span><span>fetched ' +
     new Date(state.fetchedAt).toLocaleString() + '</span>');
   if (state.error) bits.push('<span class="badge err">Fetch error: ' + esc(state.error) + '</span>');
@@ -1154,7 +1184,7 @@ function renderOverview(){
     const scoreRaw  = pot.gp3 > 0 ? curGp3 / pot.gp3 : 0;
     const score     = Math.max(0, Math.min(1, scoreRaw));
     const scoreNote = curGp3 < 0
-      ? 'currently loss-making at this margin'
+      ? 'currently loss-making at the current targets'
       : pot.gp3 <= 0 ? 'no profitable target exists in the simulated range'
       : 'current GP3 as a share of the achievable maximum';
     const costDelta = pot.cost - curCost;
@@ -1190,15 +1220,19 @@ function renderOverview(){
     ? '<div class="note">Multiple currencies in this selection — totals are shown per currency and never summed across them.</div>'
     : '');
 
-  const marginNote = state.basis === 'profit'
-    ? `GP2 is Google's reported conversion value multiplied by the gross margin from the Config tab (${
-        (margins().def*100).toFixed(0)}% default).`
-    : 'GP2 is Google’s reported conversion value at face value. Switch to <b>Profit</b> to apply gross margin.';
+  const adj = adjustedAccounts();
+  const basisNote = Object.keys(adj).length
+    ? ' ' + Object.keys(adj).map(a => `<b>${esc(a)}</b> reports revenue instead, so its value is converted (${
+        esc(multiplierLabel(adj[a]))}).`).join(' ')
+    : '';
   document.getElementById('caveatNote').innerHTML =
-    `<b>Read these as directional step moves.</b> Google’s bid simulator holds everything else constant —
+    `<b>Conversion value in these accounts is GP2 (gross profit)</b> — the primary conversion action sends
+     cart-level profit, so GP3 = GP2 − ad cost, with no margin applied on top. (Revenue is a separate secondary
+     conversion action, which bid simulations do not cover.)${basisNote}
+     <br><b>Read these as directional step moves.</b> Google’s bid simulator holds everything else constant —
      same budgets, creatives, competitors, seasonality and the same 7-day window it was measured on. It also does not
      reconcile exactly with reported ROAS. Move targets one step at a time, let the strategy re-learn for a week or two,
-     then re-check against a fresh snapshot. ${marginNote}`;
+     then re-check against a fresh snapshot.`;
 
   renderSummaryTable();
   renderTrustFlags();
@@ -1222,9 +1256,13 @@ function renderSummaryTable(){
       ? fmtPct(s.breakeven.target)
       : (s.breakeven.side === 'below' ? '&lt; ' + fmtPct(s.points[0].target)
         : s.breakeven.side === 'above' ? '&gt; ' + fmtPct(s.points[s.points.length-1].target) : '—');
+    // badge only for accounts whose conversion value had to be converted to GP2
+    const multBadge = Math.abs(s.valueToGp2Multiplier - 1) > 1e-9
+      ? ` &nbsp;<span class="pill mult" title="This account reports revenue, not GP2 — its conversion value is multiplied by ${
+          s.valueToGp2Multiplier}">${esc(multiplierLabel(s.valueToGp2Multiplier))}</span>` : '';
     html += `<tr data-strategy="${esc(s.key)}" class="${s.key === state.strategyKey ? 'sel':''}">
       <td><div class="strat-cell"><span class="nm">${esc(s.name)}</span>
-        <span class="mt">${esc(s.account)} &middot; ${s.points.length} points &middot; ${esc(s.biddingType || '')}</span></div></td>
+        <span class="mt">${esc(s.account)} &middot; ${s.points.length} points &middot; ${esc(s.biddingType || '')}${multBadge}</span></div></td>
       <td>${fmtPct(s.currentTarget)}</td>
       <td><b>${fmtPct(s.opt.target)}</b></td>
       <td class="mono" style="color:var(--muted)">${be}</td>
@@ -1550,13 +1588,13 @@ function renderHistory(){
   const inAcct = state.rows.filter(r => state.account === '__all' || r.account === state.account);
   const runs = runDates(inAcct);
   const note = document.getElementById('historyNote');
-  const m = margins();
+  const m = gp2Multipliers();
 
   // per-run table across all strategies
   let rt = `<thead><tr><th>Run date</th><th>Age</th><th>Strategies</th><th>Points</th>
     <th>Current cost</th><th>Current GP3</th><th>Potential GP3</th><th>Score</th></tr></thead><tbody>`;
   runs.slice().reverse().forEach(d => {
-    const ss = buildStrategies(inAcct.filter(r => r.runDate === d), m.map, m.def, state.basis);
+    const ss = buildStrategies(inAcct.filter(r => r.runDate === d), m.map, m.def);
     const curs = [...new Set(ss.map(s => s.currency))];
     const c = curs.length === 1 ? curs[0] : null;
     const cost = ss.reduce((a,s) => a + (s.current?s.current.cost:0), 0);
@@ -1587,7 +1625,7 @@ function renderHistory(){
 
   const key = state.strategyKey;
   const series = runs.map(d => {
-    const ss = buildStrategies(inAcct.filter(r => r.runDate === d), m.map, m.def, state.basis);
+    const ss = buildStrategies(inAcct.filter(r => r.runDate === d), m.map, m.def);
     return ss.find(s => s.account + ' · ' + s.name === key) || null;
   });
   const cur = (series.find(Boolean) || {}).currency || 'SEK';
@@ -1634,9 +1672,6 @@ document.getElementById('runSel').addEventListener('change', e => {
 document.getElementById('stratSel').addEventListener('change', e => {
   state.strategyKey = e.target.value; savePrefs(); renderStrategy(); renderHistory(); renderSummaryTable();
 });
-document.querySelectorAll('#basisSeg button').forEach(b => b.addEventListener('click', () => {
-  state.basis = b.dataset.basis; state.budget = null; rebuild(false);
-}));
 document.getElementById('budgetInput').addEventListener('change', e => {
   const v = parseFloat(e.target.value);
   state.budget = isFinite(v) && v > 0 ? v : null;
